@@ -17,6 +17,8 @@
  */
 package org.apache.cassandra.service.pager;
 
+import java.util.Optional;
+
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.partitions.*;
@@ -31,6 +33,10 @@ abstract class AbstractQueryPager implements QueryPager
     protected final ReadCommand command;
     protected final DataLimits limits;
     protected final int protocolVersion;
+
+    // The internal pager is created when the fetch command is issued since its properties will depend on
+    // the page limits and whether we need to retrieve a single page or multiple pages
+    private Optional<Pager> internalPager;
 
     private int remaining;
 
@@ -47,7 +53,7 @@ abstract class AbstractQueryPager implements QueryPager
         this.command = command;
         this.protocolVersion = protocolVersion;
         this.limits = command.limits();
-
+        this.internalPager = Optional.empty();
         this.remaining = limits.count();
         this.remainingInPartition = limits.perPartitionCount();
     }
@@ -57,26 +63,45 @@ abstract class AbstractQueryPager implements QueryPager
         return command.executionController();
     }
 
-    public PartitionIterator fetchPage(int pageSize, ConsistencyLevel consistency, ClientState clientState) throws RequestValidationException, RequestExecutionException
+    public PartitionIterator fetchPage(int pageSize, ConsistencyLevel consistency, ClientState clientState)
+    throws RequestValidationException, RequestExecutionException
     {
         if (isExhausted())
             return EmptyIterators.partition();
 
         pageSize = Math.min(pageSize, remaining);
-        Pager pager = new Pager(limits.forPaging(pageSize), command.nowInSec());
-        return Transformation.apply(nextPageReadCommand(pageSize).execute(consistency, clientState), pager);
+        internalPager = Optional.of(new Pager(limits.forPaging(pageSize), command.nowInSec(), true));
+        return Transformation.apply(nextPageReadCommand(pageSize).execute(consistency, clientState), internalPager.get());
     }
 
-    public PartitionIterator fetchPageInternal(int pageSize, ReadExecutionController executionController) throws RequestValidationException, RequestExecutionException
+    public PartitionIterator fetchPageInternal(int pageSize, ReadExecutionController executionController)
+    throws RequestValidationException, RequestExecutionException
     {
         if (isExhausted())
             return EmptyIterators.partition();
 
         pageSize = Math.min(pageSize, remaining);
-        Pager pager = new Pager(limits.forPaging(pageSize), command.nowInSec());
-        return Transformation.apply(nextPageReadCommand(pageSize).executeInternal(executionController), pager);
+        internalPager = Optional.of(new Pager(limits.forPaging(pageSize), command.nowInSec(), true));
+        return Transformation.apply(nextPageReadCommand(pageSize).executeInternal(executionController), internalPager.get());
     }
 
+    @Override
+    public PartitionIterator fetchMultiplePagesInternal(int pageSize, ReadExecutionController executionController)
+    throws RequestValidationException, RequestExecutionException
+    {
+        if (isExhausted())
+            return EmptyIterators.partition();
+
+        pageSize = Math.min(pageSize, remaining);
+        internalPager = Optional.of(new Pager(limits.forPaging(pageSize), command.nowInSec(), false));
+
+        return Transformation.apply(nextPageReadCommand(DataLimits.NO_LIMIT).executeInternal(executionController), internalPager.get());
+    }
+
+    /**
+     * A transformation to keep track of the lastRow that was iterated and to determine
+     * when a page is available. If fetching only a single page, it also stops the iteration after 1 page.
+     */
     private class Pager extends Transformation<RowIterator>
     {
         private final DataLimits pageLimits;
@@ -84,9 +109,9 @@ abstract class AbstractQueryPager implements QueryPager
         private Row lastRow;
         private boolean isFirstPartition = true;
 
-        private Pager(DataLimits pageLimits, int nowInSec)
+        private Pager(DataLimits pageLimits, int nowInSec, boolean stopAfterOnePage)
         {
-            this.counter = pageLimits.newCounter(nowInSec, true);
+            this.counter = pageLimits.newCounter(nowInSec, true).enforceLimits(stopAfterOnePage);
             this.pageLimits = pageLimits;
         }
 
@@ -100,7 +125,7 @@ abstract class AbstractQueryPager implements QueryPager
 
             // If this is the first partition of this page, this could be the continuation of a partition we've started
             // on the previous page. In which case, we could have the problem that the partition has no more "regular"
-            // rows (but the page size is such we didn't knew before) but it does has a static row. We should then skip
+            // rows (but the page size is such we didn't knew before) but it does have a static row. We should then skip
             // the partition as returning it would means to the upper layer that the partition has "only" static columns,
             // which is not the case (and we know the static results have been sent on the previous page).
             if (isFirstPartition)
@@ -118,6 +143,11 @@ abstract class AbstractQueryPager implements QueryPager
 
         @Override
         public void onClose()
+        {
+            saveState();
+        }
+
+        private void saveState()
         {
             recordLast(lastKey, lastRow);
 
@@ -152,6 +182,20 @@ abstract class AbstractQueryPager implements QueryPager
             lastRow = row;
             return row;
         }
+
+        private boolean checkPageBoundaries()
+        {
+            if (!counter.isDoneForPartition())
+                return false;
+
+            saveState();
+            return true;
+        }
+
+        private void reset()
+        {
+            counter.reset();
+        }
     }
 
     protected void restoreState(DecoratedKey lastKey, int remaining, int remainingInPartition)
@@ -164,6 +208,23 @@ abstract class AbstractQueryPager implements QueryPager
     public boolean isExhausted()
     {
         return exhausted || remaining == 0 || ((this instanceof SinglePartitionPager) && remainingInPartition == 0);
+    }
+
+    /**
+     * Check if one page is available, if it is save the last iterated state even if the iteration is still
+     * ongoing.
+     * @return True if we have a full page available.
+     */
+    @Override
+    public boolean checkPageBoundaries()
+    {
+        return internalPager.isPresent() ? internalPager.get().checkPageBoundaries() : false;
+    }
+
+    @Override
+    public void reset()
+    {
+        internalPager.ifPresent(Pager::reset);
     }
 
     public int maxRemaining()

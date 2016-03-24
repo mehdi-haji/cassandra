@@ -125,7 +125,7 @@ public class QueryProcessor implements QueryHandler
     }
 
     // Work around initialization dependency
-    private static enum InternalStateInstance
+    private enum InternalStateInstance
     {
         INSTANCE;
 
@@ -211,7 +211,7 @@ public class QueryProcessor implements QueryHandler
         statement.checkAccess(clientState);
         statement.validate(clientState);
 
-        ResultMessage result = statement.execute(queryState, options);
+        ResultMessage result = statement.executeAsync(queryState, options);
         return result == null ? new ResultMessage.Void() : result;
     }
 

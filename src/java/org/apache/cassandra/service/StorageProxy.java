@@ -920,6 +920,29 @@ public class StorageProxy implements StorageProxyMBean
         }
     }
 
+    /**
+     * Return true if the entire range can be queried locally.
+     *
+     * Split the range into sub-ranges that match ring positions and then check that for each
+     * such range the local host is a replica for it.
+     */
+    public static boolean isLocalRange(Keyspace keyspace, AbstractBounds<PartitionPosition> bounds)
+    {
+
+        for (AbstractBounds<PartitionPosition> range : StorageProxy.getRestrictedRanges(bounds))
+        {
+            Optional<InetAddress> endpoint =  StorageProxy.getSortedEndpoints(keyspace, range.right)
+                                                          .stream()
+                                                          .filter(StorageProxy::canDoLocalRequest)
+                                                          .findFirst();
+
+            if (!endpoint.isPresent())
+                return false;
+        }
+
+        return true;
+    }
+
     public static boolean canDoLocalRequest(InetAddress replica)
     {
         return replica.equals(FBUtilities.getBroadcastAddress());
@@ -1834,6 +1857,13 @@ public class StorageProxy implements StorageProxyMBean
         List<InetAddress> liveEndpoints = StorageService.instance.getLiveNaturalEndpoints(keyspace, pos);
         DatabaseDescriptor.getEndpointSnitch().sortByProximity(FBUtilities.getBroadcastAddress(), liveEndpoints);
         return liveEndpoints;
+    }
+
+    public static List<InetAddress> getSortedEndpoints(Keyspace keyspace, RingPosition pos)
+    {
+        List<InetAddress> endpoints = StorageService.instance.getNaturalEndpoints(keyspace, pos);
+        DatabaseDescriptor.getEndpointSnitch().sortByProximity(FBUtilities.getBroadcastAddress(), endpoints);
+        return endpoints;
     }
 
     private static List<InetAddress> intersection(List<InetAddress> l1, List<InetAddress> l2)

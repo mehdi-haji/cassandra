@@ -3541,6 +3541,20 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         return liveEps;
     }
 
+    /**
+     * Returns the N endpoints that are responsible for storing the specified key.
+     * Same as getLiveNaturalEndpoints() but include unreachable endpoints too.
+     */
+    public List<InetAddress> getNaturalEndpoints(Keyspace keyspace, ByteBuffer key)
+    {
+        return getNaturalEndpoints(keyspace, tokenMetadata.decorateKey(key));
+    }
+
+    public List<InetAddress> getNaturalEndpoints(Keyspace keyspace, RingPosition pos)
+    {
+        return keyspace.getReplicationStrategy().getNaturalEndpoints(pos);
+    }
+
     public void setLoggingLevel(String classQualifier, String rawLevel) throws Exception
     {
         ch.qos.logback.classic.Logger logBackLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(classQualifier);

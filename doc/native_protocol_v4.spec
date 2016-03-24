@@ -22,6 +22,7 @@ Table of Contents
       4.1.6. EXECUTE
       4.1.7. BATCH
       4.1.8. REGISTER
+      4.1.9. CANCEL
     4.2. Responses
       4.2.1. ERROR
       4.2.2. READY
@@ -180,6 +181,7 @@ Table of Contents
     0x0E    AUTH_CHALLENGE
     0x0F    AUTH_RESPONSE
     0x10    AUTH_SUCCESS
+    0x11    CANCEL
 
   Messages are described in Section 4.
 
@@ -305,7 +307,8 @@ Table of Contents
     <query><query_parameters>
   where <query> is a [long string] representing the query and
   <query_parameters> must be
-    <consistency><flags>[<n>[name_1]<value_1>...[name_n]<value_n>][<result_page_size>][<paging_state>][<serial_consistency>][<timestamp>]
+    <consistency><flags><extended_flags>[<n>[name_1]<value_1>...[name_n]<value_n>]
+    [<result_page_size>][<paging_state>][<serial_consistency>][<timestamp>][<paging_options>]
   where:
     - <consistency> is the [consistency] level for the operation.
     - <flags> is a [byte] whose bits define the options for this query and
@@ -348,6 +351,22 @@ Table of Contents
               since the names for the expected values was returned during preparation,
               a client can always provide values in the right order without any names
               and using this flag, while supported, is almost surely inefficient.
+        0x80: With extended flags. If set, <extended_flags> should be present.
+    - <extended_flags> is a [byte] whose bits define additional options for this query and,
+      like <flags>, may influence the remainder of the message. Supported extended flags:
+        0x01: With paging options. If set, <paging_options> will be present and the
+              query result will be pushed to the client asynchronously, and according to
+              the paging options. Asynchronous paging can be interrupted via a CANCEL request.
+              <paging_options> contains the following:
+                - <uuid>, a [UUID] that uniquely identifies an asynchronous paging session.
+                - <page_size>, an [Int] indicating the size of each page in bytes. This is a
+                  mandatory parameter that takes precendence over <result_page_size>, which is
+                  obsoleted by this parameter.
+                - <max_num_pages>, an [Int] indicating the maximum number of pages to
+                  receive in total, set this to zero to indicate no limit.
+                - <pages_per_second>, an [Int] indicating the maximum number of pages to receive
+                  per second, set this to zero to indicate no limit.
+
 
   Note that the consistency is ignored by some queries (USE, CREATE, ALTER,
   TRUNCATE, ...).
@@ -454,6 +473,11 @@ Table of Contents
   multiple times the same event messages, wasting bandwidth.
 
 
+4.1.9. CANCEL
+
+  Request to cancel an asynchronous operation. The body of the message is a [uuid]
+  that contains the unique identifier of the operation to cancel.
+
 4.2. Responses
 
   This section describes the content of the frame body for the different
@@ -536,7 +560,7 @@ Table of Contents
     <metadata><rows_count><rows_content>
   where:
     - <metadata> is composed of:
-        <flags><columns_count>[<paging_state>][<global_table_spec>?<col_spec_1>...<col_spec_n>]
+        <flags><columns_count>[<paging_state>][<global_table_spec>?<col_spec_1>...<col_spec_n>][<paging_params>]
       where:
         - <flags> is an [int]. The bits of <flags> provides information on the
           formatting of the remaining information. A flag is set if the bit
@@ -557,6 +581,8 @@ Table of Contents
                       no other information (so no <global_table_spec> nor <col_spec_i>).
                       This will only ever be the case if this was requested
                       during the query (see QUERY and RESULT messages).
+            0x0005    With_asynchronous_paging: if set, this result is part of an asynchronous
+                      paging session and the <paging_params> will be present.
         - <columns_count> is an [int] representing the number of columns selected
           by the query that produced this result. It defines the number of <col_spec_i>
           elements in and the number of elements for each row in <rows_content>.
@@ -621,6 +647,8 @@ Table of Contents
                              representing the number of values in the type, and <type_i>
                              are [option] representing the type of the i_th component
                              of the tuple
+        - <paging_params> contains the [uuid] that uniquely identifies the asynchronous paging session
+          and an [int] that identifies the sequential number of this result in the session.
 
     - <rows_count> is an [int] representing the number of rows present in this
       result. Those rows are serialized in the <rows_content> part.

@@ -29,9 +29,13 @@ import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.functions.Function;
+import org.apache.cassandra.db.marshal.CollectionType;
+import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.rows.ComplexColumnData;
+import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -285,14 +289,14 @@ public abstract class Selection
 
     public class ResultSetBuilder
     {
-        private final ResultSet resultSet;
+        private ResultSet resultSet;
         private final int protocolVersion;
 
         /**
          * As multiple thread can access a <code>Selection</code> instance each <code>ResultSetBuilder</code> will use
          * its own <code>Selectors</code> instance.
          */
-        private final Selectors selectors;
+        private Selectors selectors;
 
         /*
          * We'll build CQL3 row one by one.
@@ -310,18 +314,89 @@ public abstract class Selection
 
         private ResultSetBuilder(QueryOptions options, boolean isJson) throws InvalidRequestException
         {
-            this.resultSet = new ResultSet(getResultMetadata(isJson).copy(), new ArrayList<List<ByteBuffer>>());
             this.protocolVersion = options.getProtocolVersion();
-            this.selectors = newSelectors(options);
+            this.selectors = newSelectors();
             this.timestamps = collectTimestamps ? new long[columns.size()] : null;
             this.ttls = collectTTLs ? new int[columns.size()] : null;
             this.isJson = isJson;
+
+            reset(options);
+        }
+
+        public void reset(QueryOptions options)
+        {
+            this.resultSet = new ResultSet(getResultMetadata(isJson).copy(), new ArrayList<List<ByteBuffer>>());
+			this.selectors = newSelectors(options);
+
+            this.current = null;
 
             // We use MIN_VALUE to indicate no timestamp and -1 for no ttl
             if (timestamps != null)
                 Arrays.fill(timestamps, Long.MIN_VALUE);
             if (ttls != null)
                 Arrays.fill(ttls, -1);
+        }
+
+        public void addRow(Row row, Row staticRow, ByteBuffer[] keyComponents, List<ColumnDefinition> columns, int nowInSec, int protocolVersion)
+        {
+            newRow(protocolVersion);
+            // Respect selection order
+            for (ColumnDefinition def : columns)
+            {
+                switch (def.kind)
+                {
+                    case PARTITION_KEY:
+                        add(keyComponents[def.position()]);
+                        break;
+                    case CLUSTERING:
+                        add(row.clustering().get(def.position()));
+                        break;
+                    case REGULAR:
+                        addCell(def, row, nowInSec, protocolVersion);
+                        break;
+                    case STATIC:
+                        addCell(def, staticRow, nowInSec, protocolVersion);
+                        break;
+                }
+            }
+        }
+
+        public void addStaticRow(Row staticRow, ByteBuffer[] keyComponents, List<ColumnDefinition> columns, int nowInSec, int protocolVersion)
+        {
+            newRow(protocolVersion);
+            for (ColumnDefinition def : columns)
+            {
+                switch (def.kind)
+                {
+                    case PARTITION_KEY:
+                        add(keyComponents[def.position()]);
+                        break;
+                    case STATIC:
+                        addCell(def, staticRow, nowInSec, protocolVersion);
+                        break;
+                    default:
+                        add((ByteBuffer)null);
+                }
+            }
+        }
+
+        public void addCell(ColumnDefinition def, Row row, int nowInSec, int protocolVersion)
+        {
+            if (def.isComplex())
+            {
+                assert def.type.isMultiCell();
+                ComplexColumnData complexData = row.getComplexColumnData(def);
+                if (complexData == null)
+                    add(null);
+                else if (def.type.isCollection())
+                    add(((CollectionType) def.type).serializeForNativeProtocol(complexData.iterator(), protocolVersion));
+                else
+                    add(((UserType) def.type).serializeForNativeProtocol(complexData.iterator(), protocolVersion));
+            }
+            else
+            {
+                add(row.getCell(def), nowInSec);
+            }
         }
 
         public void add(ByteBuffer v)

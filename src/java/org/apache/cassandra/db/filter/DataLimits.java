@@ -165,9 +165,9 @@ public abstract class DataLimits
         // false means we do not propagate our stop signals onto the iterator, we only count
         private boolean enforceLimits = true;
 
-        public Counter onlyCount()
+        public Counter enforceLimits(boolean enforceLimits)
         {
-            this.enforceLimits = false;
+            this.enforceLimits = enforceLimits;
             return this;
         }
 
@@ -203,6 +203,11 @@ public abstract class DataLimits
 
         public abstract boolean isDone();
         public abstract boolean isDoneForPartition();
+
+        /**
+         * Reset the counter variables so that we can start counting for another page.
+         */
+        public abstract void reset();
 
         @Override
         protected BaseRowIterator<?> applyToPartition(BaseRowIterator<?> partition)
@@ -417,6 +422,13 @@ public abstract class DataLimits
             public boolean isDoneForPartition()
             {
                 return isDone() || rowInCurrentPartition >= perPartitionLimit;
+            }
+
+            public void reset()
+            {
+                rowCounted = 0;
+                rowInCurrentPartition = 0;
+                hasLiveStaticRow = false;
             }
         }
 
@@ -664,6 +676,13 @@ public abstract class DataLimits
             public boolean isDoneForPartition()
             {
                 return isDone() || cellsInCurrentPartition >= cellPerPartitionLimit;
+            }
+
+            public void reset()
+            {
+                partitionsCounted = 0;
+                cellsCounted = 0;
+                cellsInCurrentPartition = 0;
             }
         }
 

@@ -30,6 +30,7 @@ import org.apache.cassandra.thrift.CqlMetadata;
 import org.apache.cassandra.thrift.CqlResult;
 import org.apache.cassandra.thrift.CqlResultType;
 import org.apache.cassandra.thrift.CqlRow;
+import org.apache.cassandra.transport.async.paging.AsyncPagingParams;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.service.pager.PagingState;
 
@@ -42,7 +43,7 @@ public class ResultSet
 
     public ResultSet(List<ColumnSpecification> metadata)
     {
-        this(new ResultMetadata(metadata), new ArrayList<List<ByteBuffer>>());
+        this(new ResultMetadata(metadata), new ArrayList<>());
     }
 
     public ResultSet(ResultMetadata metadata, List<List<ByteBuffer>> rows)
@@ -70,7 +71,7 @@ public class ResultSet
     public void addColumnValue(ByteBuffer value)
     {
         if (rows.isEmpty() || lastRow().size() == metadata.valueCount())
-            rows.add(new ArrayList<ByteBuffer>(metadata.valueCount()));
+            rows.add(new ArrayList<>(metadata.valueCount()));
 
         lastRow().add(value);
     }
@@ -100,8 +101,8 @@ public class ResultSet
         assert metadata.names != null;
 
         String UTF8 = "UTF8Type";
-        CqlMetadata schema = new CqlMetadata(new HashMap<ByteBuffer, String>(),
-                new HashMap<ByteBuffer, String>(),
+        CqlMetadata schema = new CqlMetadata(new HashMap<>(),
+                new HashMap<>(),
                 // The 2 following ones shouldn't be needed in CQL3
                 UTF8, UTF8);
 
@@ -115,10 +116,10 @@ public class ResultSet
 
         }
 
-        List<CqlRow> cqlRows = new ArrayList<CqlRow>(rows.size());
+        List<CqlRow> cqlRows = new ArrayList<>(rows.size());
         for (List<ByteBuffer> row : rows)
         {
-            List<Column> thriftCols = new ArrayList<Column>(metadata.columnCount);
+            List<Column> thriftCols = new ArrayList<>(metadata.columnCount);
             for (int i = 0; i < metadata.columnCount; i++)
             {
                 Column col = new Column(ByteBufferUtil.bytes(metadata.names.get(i).name.toString()));
@@ -181,7 +182,7 @@ public class ResultSet
         {
             ResultMetadata m = ResultMetadata.codec.decode(body, version);
             int rowCount = body.readInt();
-            ResultSet rs = new ResultSet(m, new ArrayList<List<ByteBuffer>>(rowCount));
+            ResultSet rs = new ResultSet(m, new ArrayList<>(rowCount));
 
             // rows
             int totalValues = rowCount * m.columnCount;
@@ -233,6 +234,7 @@ public class ResultSet
         public final List<ColumnSpecification> names;
         private final int columnCount;
         private PagingState pagingState;
+        private Optional<AsyncPagingParams> streamingState;
 
         public ResultMetadata(List<ColumnSpecification> names)
         {
@@ -243,15 +245,25 @@ public class ResultSet
 
         private ResultMetadata(EnumSet<Flag> flags, List<ColumnSpecification> names, int columnCount, PagingState pagingState)
         {
+            this(flags, names, columnCount, pagingState, Optional.empty());
+        }
+
+        private ResultMetadata(EnumSet<Flag> flags,
+                               List<ColumnSpecification> names,
+                               int columnCount,
+                               PagingState pagingState,
+                               Optional<AsyncPagingParams> streamingState)
+        {
             this.flags = flags;
             this.names = names;
             this.columnCount = columnCount;
             this.pagingState = pagingState;
+            this.streamingState = streamingState;
         }
 
         public ResultMetadata copy()
         {
-            return new ResultMetadata(EnumSet.copyOf(flags), names, columnCount, pagingState);
+            return new ResultMetadata(EnumSet.copyOf(flags), names, columnCount, pagingState, streamingState);
         }
 
         /**
@@ -281,6 +293,12 @@ public class ResultSet
             names.add(name);
         }
 
+        public PagingState pagingState()
+        {
+            return pagingState;
+        }
+
+
         public void setHasMorePages(PagingState pagingState)
         {
             this.pagingState = pagingState;
@@ -288,6 +306,17 @@ public class ResultSet
                 flags.remove(Flag.HAS_MORE_PAGES);
             else
                 flags.add(Flag.HAS_MORE_PAGES);
+        }
+
+        public boolean hasMorePages()
+        {
+            return flags.contains(Flag.HAS_MORE_PAGES);
+        }
+
+        public void setStreamingState(AsyncPagingParams asyncPagingParams)
+        {
+            this.streamingState = Optional.of(asyncPagingParams);
+            flags.add(Flag.WITH_STREAMING);
         }
 
         public void setSkipMetadata()
@@ -313,8 +342,17 @@ public class ResultSet
                     sb.append(", ").append(name.type).append("]");
                 }
             }
+
+            if (streamingState.isPresent())
+            {
+                sb.append(" [streaming: ");
+                sb.append(streamingState.get().toString());
+                sb.append(']');
+            }
+
             if (flags.contains(Flag.HAS_MORE_PAGES))
                 sb.append(" (to be continued)");
+
             return sb.toString();
         }
 
@@ -333,7 +371,7 @@ public class ResultSet
                     state = PagingState.deserialize(CBUtil.readValue(body), version);
 
                 if (flags.contains(Flag.NO_METADATA))
-                    return new ResultMetadata(flags, null, columnCount, state);
+                    return new ResultMetadata(flags, null, columnCount, state, streamingState(flags, body, version));
 
                 boolean globalTablesSpec = flags.contains(Flag.GLOBAL_TABLES_SPEC);
 
@@ -355,7 +393,14 @@ public class ResultSet
                     AbstractType type = DataType.toType(DataType.codec.decodeOne(body, version));
                     names.add(new ColumnSpecification(ksName, cfName, colName, type));
                 }
-                return new ResultMetadata(flags, names, names.size(), state);
+                return new ResultMetadata(flags, names, names.size(), state, streamingState(flags, body, version));
+            }
+
+            private Optional<AsyncPagingParams> streamingState(EnumSet<Flag> flags, ByteBuf body, int version)
+            {
+                return flags.contains(Flag.WITH_STREAMING)
+                       ? Optional.of(AsyncPagingParams.codec.decode(body, version))
+                       : Optional.empty();
             }
 
             public void encode(ResultMetadata m, ByteBuf dest, int version)
@@ -392,6 +437,8 @@ public class ResultSet
                         DataType.codec.writeOne(DataType.fromType(name.type, version), dest, version);
                     }
                 }
+
+                m.streamingState.ifPresent(streamingState -> AsyncPagingParams.codec.encode(streamingState, dest, version));
             }
 
             public int encodedSize(ResultMetadata m, int version)
@@ -424,6 +471,10 @@ public class ResultSet
                         size += DataType.codec.oneSerializedSize(DataType.fromType(name.type, version), version);
                     }
                 }
+
+                if (m.streamingState.isPresent())
+                    size += AsyncPagingParams.codec.encodedSize(m.streamingState.get(), version);
+
                 return size;
             }
         }
@@ -608,12 +659,13 @@ public class ResultSet
         }
     }
 
-    public static enum Flag
+    public enum Flag
     {
-        // The order of that enum matters!!
+        // The order of this enum matters!!
         GLOBAL_TABLES_SPEC,
         HAS_MORE_PAGES,
-        NO_METADATA;
+        NO_METADATA,
+        WITH_STREAMING;
 
         public static EnumSet<Flag> deserialize(int flags)
         {

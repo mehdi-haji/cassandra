@@ -19,6 +19,7 @@
 package org.apache.cassandra.stress.operations.userdefined;
 
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -26,11 +27,12 @@ import java.util.stream.Collectors;
 
 import javax.naming.OperationNotSupportedException;
 
+import com.datastax.driver.core.AsyncPagingOptions;
+import com.datastax.driver.core.ColumnDefinitions;
 import com.datastax.driver.core.ColumnMetadata;
-import com.datastax.driver.core.PagingState;
 import com.datastax.driver.core.ResultSet;
+import com.datastax.driver.core.ResultSetIterator;
 import com.datastax.driver.core.Row;
-import com.datastax.driver.core.SimpleStatement;
 import com.datastax.driver.core.Statement;
 import com.datastax.driver.core.TableMetadata;
 import com.datastax.driver.core.Token;
@@ -39,6 +41,7 @@ import org.apache.cassandra.stress.Operation;
 import org.apache.cassandra.stress.StressYaml;
 import org.apache.cassandra.stress.WorkManager;
 import org.apache.cassandra.stress.generate.TokenRangeIterator;
+import org.apache.cassandra.stress.settings.SettingsTokenRange;
 import org.apache.cassandra.stress.settings.StressSettings;
 import org.apache.cassandra.stress.util.JavaDriverClient;
 import org.apache.cassandra.stress.util.ThriftClient;
@@ -51,8 +54,9 @@ public class TokenRangeQuery extends Operation
     private final TableMetadata tableMetadata;
     private final TokenRangeIterator tokenRangeIterator;
     private final String columns;
-    private final int pageSize;
+    private final int pageSizeBytes;
     private final boolean isWarmup;
+    private final PrintWriter resultsWriter;
 
     public TokenRangeQuery(Timer timer,
                            StressSettings settings,
@@ -65,8 +69,21 @@ public class TokenRangeQuery extends Operation
         this.tableMetadata = tableMetadata;
         this.tokenRangeIterator = tokenRangeIterator;
         this.columns = sanitizeColumns(def.columns, tableMetadata);
-        this.pageSize = isWarmup ? Math.min(100, def.page_size) : def.page_size;
+        this.pageSizeBytes = def.page_size_bytes;
         this.isWarmup = isWarmup;
+        this.resultsWriter = maybeCreateResultsWriter(settings.tokenRange);
+    }
+
+    private static PrintWriter maybeCreateResultsWriter(SettingsTokenRange settings)
+    {
+        try
+        {
+            return settings.saveData ? new PrintWriter(settings.dataFileName, "UTF-8") : null;
+        }
+        catch (IOException ex)
+        {
+            throw new RuntimeException(ex);
+        }
     }
 
     /**
@@ -90,8 +107,8 @@ public class TokenRangeQuery extends Operation
     {
         public final TokenRange tokenRange;
         public final String query;
-        public PagingState pagingState;
         public Set<Token> partitions = new HashSet<>();
+        public ResultSetIterator resultSetIterator;
 
         public State(TokenRange tokenRange, String query)
         {
@@ -106,7 +123,7 @@ public class TokenRangeQuery extends Operation
         }
     }
 
-    abstract static class Runner implements RunOp
+    abstract class Runner implements RunOp
     {
         int partitionCount;
         int rowCount;
@@ -122,40 +139,24 @@ public class TokenRangeQuery extends Operation
         {
             return rowCount;
         }
-    }
 
-    private class JavaDriverRun extends Runner
-    {
-        final JavaDriverClient client;
-
-        private JavaDriverRun(JavaDriverClient client)
-        {
-            this.client = client;
-        }
-
-        public boolean run() throws Exception
+        State getState()
         {
             State state = currentState.get();
             if (state == null)
             { // start processing a new token range
                 TokenRange range = tokenRangeIterator.next();
                 if (range == null)
-                    return true; // no more token ranges to process
+                    return null; // no more token ranges to process
 
                 state = new State(range, buildQuery(range));
                 currentState.set(state);
             }
+            return state;
+        }
 
-            ResultSet results;
-            Statement statement = new SimpleStatement(state.query);
-            statement.setFetchSize(pageSize);
-
-            if (state.pagingState != null)
-                statement.setPagingState(state.pagingState);
-
-            results = client.getSession().execute(statement);
-            state.pagingState = results.getExecutionInfo().getPagingState();
-
+        void processResults(State state, ResultSet results)
+        {
             int remaining = results.getAvailableWithoutFetching();
             rowCount += remaining;
 
@@ -169,18 +170,108 @@ public class TokenRangeQuery extends Operation
                     state.partitions.add(partition);
                 }
 
+                if (shouldSaveResults())
+                    saveRow(row);
+
                 if (--remaining == 0)
                     break;
             }
 
-            if (results.isExhausted() || isWarmup)
-            { // no more pages to fetch or just warming up, ready to move on to another token range
-                currentState.set(null);
-            }
+            if (shouldSaveResults())
+                flushResults();
 
-            return true;
+        }
+
+        private boolean shouldSaveResults()
+        {
+            return resultsWriter != null && !isWarmup;
+        }
+
+        private void flushResults()
+        {
+            synchronized (resultsWriter)
+            {
+                resultsWriter.flush();
+            }
+        }
+
+        private void saveRow(Row row)
+        {
+            assert resultsWriter != null;
+            synchronized (resultsWriter)
+            {
+                for (ColumnDefinitions.Definition cd : row.getColumnDefinitions())
+                {
+                    Object value = row.getObject(cd.getName());
+
+                    if (value instanceof String)
+                        resultsWriter.print(((String)value).replaceAll("\\p{C}", "?"));
+                    else
+                        resultsWriter.print(value.toString());
+
+                    resultsWriter.print(',');
+                }
+                resultsWriter.print(System.lineSeparator());
+            }
         }
     }
+
+    private Runner newJavaDriverRunner(JavaDriverClient client)
+    {
+        return new BulkLoadPages(client);
+    }
+
+    private class BulkLoadPages extends Runner
+    {
+        final JavaDriverClient client;
+
+        private BulkLoadPages(JavaDriverClient client)
+        {
+            this.client = client;
+        }
+
+        public boolean run() throws Exception
+        {
+            State state = getState();
+            if (state == null)
+                return true;
+
+            ResultSet results;
+            if (state.resultSetIterator != null)
+            {
+                if (state.resultSetIterator.hasNext() && !isWarmup)
+                {
+                    results = state.resultSetIterator.next();
+                }
+                else
+                {  // move on to the next token
+                    state.resultSetIterator.close();
+                    currentState.set(null);
+                    state = getState();
+                    if (state == null)
+                        return true;
+
+                    results = fetchPages(state);
+                }
+            }
+            else
+            {
+                results = fetchPages(state);
+            }
+
+            processResults(state, results);
+            return true;
+        }
+
+        private ResultSet fetchPages(State state) throws Exception
+        {
+            Statement statement = client.makeTokenRangeStatement(state.query, state.tokenRange);
+            state.resultSetIterator = client.getSession().executeAsync(statement,
+                                                                       AsyncPagingOptions.create(pageSizeBytes));
+            return state.resultSetIterator.next();
+        }
+    }
+
 
     private String buildQuery(TokenRange tokenRange)
     {
@@ -218,7 +309,7 @@ public class TokenRangeQuery extends Operation
         return ret.toString();
     }
 
-    private static class ThriftRun extends Runner
+    private class ThriftRun extends Runner
     {
         final ThriftClient client;
 
@@ -237,7 +328,7 @@ public class TokenRangeQuery extends Operation
     @Override
     public void run(JavaDriverClient client) throws IOException
     {
-        timeWithRetry(new JavaDriverRun(client));
+        timeWithRetry(newJavaDriverRunner(client));
     }
 
     @Override

@@ -28,23 +28,31 @@ public class SettingsTokenRange
 {
     public final boolean wrap;
     public final int splitFactor;
+    public final boolean localRouting;
+    public final boolean saveData;
+    public final String dataFileName;
 
     public SettingsTokenRange(TokenRangeOptions options)
     {
         this.wrap = options.wrap.setByUser();
         this.splitFactor = Ints.checkedCast(OptionDistribution.parseLong(options.splitFactor.value()));
+        this.localRouting = options.localRouting.setByUser();
+        this.saveData = options.saveData.setByUser();
+        this.dataFileName = options.saveData.value();
     }
 
     private static final class TokenRangeOptions extends GroupedOptions
     {
         final OptionSimple wrap = new OptionSimple("wrap", "", null, "Re-use token ranges in order to terminate stress iterations", false);
         final OptionSimple splitFactor = new OptionSimple("split-factor=", "[0-9]+[bmk]?", "1", "Split every token range by this factor", false);
+        final OptionSimple localRouting = new OptionSimple("localRouting", "", null, "Route queries to a local replica", false);
+        final OptionSimple saveData = new OptionSimple("savedata=", ".+", "stress-data.txt", "Save data to a file", false);
 
 
         @Override
         public List<? extends Option> options()
         {
-            return ImmutableList.<Option>builder().add(wrap, splitFactor).build();
+            return ImmutableList.<Option>builder().add(wrap, splitFactor, localRouting, saveData).build();
         }
     }
 

@@ -61,6 +61,10 @@
 
   <logger name="org.apache.cassandra.db.monitoring" level="DEBUG"/>
 
+  <logger name="org.apache.cassandra.transport" level="INFO"/>
+  <logger name="com.datastax.driver.core" level="DEBUG"/>
+  <logger name="io.netty" level="DEBUG"/>
+
   <!-- Do not change the name of this appender. LogbackStatusListener uses the thread name
        tied to the appender name to know when to write to real stdout/stderr vs forwarding to logback -->
   <appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender">

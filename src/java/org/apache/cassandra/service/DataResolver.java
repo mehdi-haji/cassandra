@@ -306,7 +306,7 @@ public class DataResolver extends ResponseResolver
         private ShortReadProtection(InetAddress source, DataLimits.Counter postReconciliationCounter)
         {
             this.source = source;
-            this.counter = command.limits().newCounter(command.nowInSec(), false).onlyCount();
+            this.counter = command.limits().newCounter(command.nowInSec(), false).enforceLimits(false);
             this.postReconciliationCounter = postReconciliationCounter;
         }
 

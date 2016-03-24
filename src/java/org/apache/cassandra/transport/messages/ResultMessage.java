@@ -80,7 +80,7 @@ public abstract class ResultMessage extends Message.Response
             }
         }
 
-        private Kind(int id, Message.Codec<ResultMessage> subcodec)
+        Kind(int id, Message.Codec<ResultMessage> subcodec)
         {
             this.id = id;
             this.subcodec = subcodec;
@@ -319,8 +319,8 @@ public abstract class ResultMessage extends Message.Response
 
         public CqlPreparedResult toThriftPreparedResult()
         {
-            List<String> namesString = new ArrayList<String>(metadata.names.size());
-            List<String> typesString = new ArrayList<String>(metadata.names.size());
+            List<String> namesString = new ArrayList<>(metadata.names.size());
+            List<String> typesString = new ArrayList<>(metadata.names.size());
             for (ColumnSpecification name : metadata.names)
             {
                 namesString.add(name.toString());
@@ -332,7 +332,7 @@ public abstract class ResultMessage extends Message.Response
         @Override
         public String toString()
         {
-            return "RESULT PREPARED " + statementId + " " + metadata + " (resultMetadata=" + resultMetadata + ")";
+            return "RESULT PREPARED " + statementId + ' ' + metadata + " (resultMetadata=" + resultMetadata + ')';
         }
     }
 

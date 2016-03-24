@@ -44,6 +44,7 @@ public abstract class QueryOptions
                                                                        Collections.<ByteBuffer>emptyList(),
                                                                        false,
                                                                        SpecificOptions.DEFAULT,
+                                                                       AsyncPagingOptions.DEFAULT,
                                                                        Server.CURRENT_VERSION);
 
     public static final CBCodec<QueryOptions> codec = new Codec();
@@ -53,27 +54,27 @@ public abstract class QueryOptions
 
     public static QueryOptions fromThrift(ConsistencyLevel consistency, List<ByteBuffer> values)
     {
-        return new DefaultQueryOptions(consistency, values, false, SpecificOptions.DEFAULT, Server.VERSION_3);
+        return new DefaultQueryOptions(consistency, values, false, SpecificOptions.DEFAULT, AsyncPagingOptions.DEFAULT, Server.VERSION_3);
     }
 
     public static QueryOptions forInternalCalls(ConsistencyLevel consistency, List<ByteBuffer> values)
     {
-        return new DefaultQueryOptions(consistency, values, false, SpecificOptions.DEFAULT, Server.VERSION_3);
+        return new DefaultQueryOptions(consistency, values, false, SpecificOptions.DEFAULT, AsyncPagingOptions.DEFAULT, Server.VERSION_3);
     }
 
     public static QueryOptions forInternalCalls(List<ByteBuffer> values)
     {
-        return new DefaultQueryOptions(ConsistencyLevel.ONE, values, false, SpecificOptions.DEFAULT, Server.VERSION_3);
+        return new DefaultQueryOptions(ConsistencyLevel.ONE, values, false, SpecificOptions.DEFAULT, AsyncPagingOptions.DEFAULT, Server.VERSION_3);
     }
 
     public static QueryOptions forProtocolVersion(int protocolVersion)
     {
-        return new DefaultQueryOptions(null, null, true, null, protocolVersion);
+        return new DefaultQueryOptions(null, null, true, null, null, protocolVersion);
     }
 
     public static QueryOptions create(ConsistencyLevel consistency, List<ByteBuffer> values, boolean skipMetadata, int pageSize, PagingState pagingState, ConsistencyLevel serialConsistency)
     {
-        return new DefaultQueryOptions(consistency, values, skipMetadata, new SpecificOptions(pageSize, pagingState, serialConsistency, -1L), 0);
+        return new DefaultQueryOptions(consistency, values, skipMetadata, new SpecificOptions(pageSize, pagingState, serialConsistency, -1L), AsyncPagingOptions.DEFAULT, 0);
     }
 
     public static QueryOptions addColumnSpecifications(QueryOptions options, List<ColumnSpecification> columnSpecs)
@@ -185,6 +186,9 @@ public abstract class QueryOptions
     // Mainly for the sake of BatchQueryOptions
     abstract SpecificOptions getSpecificOptions();
 
+    // Streaming options
+    public abstract AsyncPagingOptions getAsyncPagingOptions();
+
     public QueryOptions prepare(List<ColumnSpecification> specs)
     {
         return this;
@@ -197,15 +201,22 @@ public abstract class QueryOptions
         private final boolean skipMetadata;
 
         private final SpecificOptions options;
+        private final AsyncPagingOptions asyncPagingOptions;
 
         private final transient int protocolVersion;
 
-        DefaultQueryOptions(ConsistencyLevel consistency, List<ByteBuffer> values, boolean skipMetadata, SpecificOptions options, int protocolVersion)
+        DefaultQueryOptions(ConsistencyLevel consistency,
+                            List<ByteBuffer> values,
+                            boolean skipMetadata,
+                            SpecificOptions options,
+                            AsyncPagingOptions asyncPagingOptions,
+                            int protocolVersion)
         {
             this.consistency = consistency;
             this.values = values;
             this.skipMetadata = skipMetadata;
             this.options = options;
+            this.asyncPagingOptions = asyncPagingOptions;
             this.protocolVersion = protocolVersion;
         }
 
@@ -233,6 +244,8 @@ public abstract class QueryOptions
         {
             return options;
         }
+
+        public AsyncPagingOptions getAsyncPagingOptions() { return asyncPagingOptions; }
     }
 
     static class QueryOptionsWrapper extends QueryOptions
@@ -267,6 +280,11 @@ public abstract class QueryOptions
         SpecificOptions getSpecificOptions()
         {
             return wrapped.getSpecificOptions();
+        }
+
+        public AsyncPagingOptions getAsyncPagingOptions()
+        {
+            return wrapped.getAsyncPagingOptions();
         }
 
         @Override
@@ -362,9 +380,95 @@ public abstract class QueryOptions
         }
     }
 
+    // Options that are stored in the extended flags
+    static class ExtendedOptions
+    {
+        private static final ExtendedOptions DEFAULT = new ExtendedOptions(false);
+
+        private final boolean withStreaming;
+
+        private ExtendedOptions(boolean withStreaming)
+        {
+            this.withStreaming = withStreaming;
+        }
+
+        /**
+         * @return true if there is at least one member variable that is different from its defalt value.
+         */
+        private boolean required()
+        {
+            return withStreaming != false;
+        }
+    }
+
+    public static class AsyncPagingOptions
+    {
+        private static final UUID NO_ASYNC_PAGING_UUID = new UUID(0, 0);
+        private static final AsyncPagingOptions DEFAULT = new AsyncPagingOptions(NO_ASYNC_PAGING_UUID);
+
+        public final UUID uuid;
+        public final int pageSize;
+        public final int maxPages;
+        public final int maxPagesPerSecond;
+
+        private AsyncPagingOptions(UUID uuid)
+        {
+            this(uuid, 0, 0, 0);
+        }
+
+        private AsyncPagingOptions(UUID uuid, int pageSize, int maxPages, int maxPagesPerSecond)
+        {
+            this.uuid = uuid;
+            this.pageSize = pageSize;
+            this.maxPages = maxPages;
+            this.maxPagesPerSecond = maxPagesPerSecond;
+        }
+
+        public static AsyncPagingOptions decode(ByteBuf body, int version)
+        {
+            return new AsyncPagingOptions(CBUtil.readUUID(body), body.readInt(), body.readInt(), body.readInt());
+        }
+
+        public void encode(ByteBuf dest, int version)
+        {
+            CBUtil.writeUUID(uuid, dest);
+            dest.writeInt(pageSize);
+            dest.writeInt(maxPages);
+            dest.writeInt(maxPagesPerSecond);
+        }
+
+        public int encodedSize(int version)
+        {
+            return CBUtil.sizeOfUUID(uuid) + 12;
+        }
+
+        public boolean asyncPagingRequested()
+        {
+            return !uuid.equals(NO_ASYNC_PAGING_UUID);
+        }
+    }
+
     private static class Codec implements CBCodec<QueryOptions>
     {
-        private static enum Flag
+        private static <E extends Enum<E>> EnumSet<E> deserializeFlags(int flags, E[] values, EnumSet<E> set)
+        {
+            for (int n = 0; n < values.length; n++)
+            {
+                if ((flags & (1 << n)) != 0)
+                    set.add(values[n]);
+            }
+            return set;
+        }
+
+        public static <E extends Enum<E>> int serializeFlags(EnumSet<E> flags)
+        {
+            int i = 0;
+            for (E flag : flags)
+                i |= 1 << flag.ordinal();
+            return i;
+        }
+
+        private enum Flag
         {
             // The order of that enum matters!!
             VALUES,
@@ -373,27 +477,37 @@ public abstract class QueryOptions
             PAGING_STATE,
             SERIAL_CONSISTENCY,
             TIMESTAMP,
-            NAMES_FOR_VALUES;
+            NAMES_FOR_VALUES,
+            EXTENDED_FLAGS;
 
             private static final Flag[] ALL_VALUES = values();
 
             public static EnumSet<Flag> deserialize(int flags)
             {
-                EnumSet<Flag> set = EnumSet.noneOf(Flag.class);
-                for (int n = 0; n < ALL_VALUES.length; n++)
-                {
-                    if ((flags & (1 << n)) != 0)
-                        set.add(ALL_VALUES[n]);
-                }
-                return set;
+                return deserializeFlags(flags, ALL_VALUES, EnumSet.noneOf(Flag.class));
             }
 
             public static int serialize(EnumSet<Flag> flags)
             {
-                int i = 0;
-                for (Flag flag : flags)
-                    i |= 1 << flag.ordinal();
-                return i;
+                return serializeFlags(flags);
+            }
+        }
+
+        private enum ExtendedFlag
+        {
+            // The order of this enum matters!!
+            WITH_ASYNC_PAGING;
+
+            private static final ExtendedFlag[] ALL_VALUES = values();
+
+            public static EnumSet<ExtendedFlag> deserialize(int flags)
+            {
+                return deserializeFlags(flags, ALL_VALUES, EnumSet.noneOf(ExtendedFlag.class));
+            }
+
+            public static int serialize(EnumSet<ExtendedFlag> flags)
+            {
+                return serializeFlags(flags);
             }
         }
 
@@ -401,6 +515,9 @@ public abstract class QueryOptions
         {
             ConsistencyLevel consistency = CBUtil.readConsistencyLevel(body);
             EnumSet<Flag> flags = Flag.deserialize((int)body.readByte());
+            EnumSet<ExtendedFlag> extendedFlags = flags.contains(Flag.EXTENDED_FLAGS)
+                                                  ? ExtendedFlag.deserialize((int)body.readByte())
+                                                  : EnumSet.noneOf(ExtendedFlag.class);
 
             List<ByteBuffer> values = Collections.<ByteBuffer>emptyList();
             List<String> names = null;
@@ -439,7 +556,12 @@ public abstract class QueryOptions
 
                 options = new SpecificOptions(pageSize, pagingState, serialConsistency, timestamp);
             }
-            DefaultQueryOptions opts = new DefaultQueryOptions(consistency, values, skipMetadata, options, version);
+
+            AsyncPagingOptions asyncPagingOptions = extendedFlags.contains(ExtendedFlag.WITH_ASYNC_PAGING)
+                                                    ? AsyncPagingOptions.decode(body, version)
+                                                    : AsyncPagingOptions.DEFAULT;
+
+            DefaultQueryOptions opts = new DefaultQueryOptions(consistency, values, skipMetadata, options, asyncPagingOptions, version);
             return names == null ? opts : new OptionsWithNames(opts, names);
         }
 
@@ -448,7 +570,11 @@ public abstract class QueryOptions
             CBUtil.writeConsistencyLevel(options.getConsistency(), dest);
 
             EnumSet<Flag> flags = gatherFlags(options);
-            dest.writeByte((byte)Flag.serialize(flags));
+            dest.writeByte((byte) Flag.serialize(flags));
+
+            EnumSet<ExtendedFlag> extendedFlags = gatherExtendedFlags(options);
+            if (flags.contains(Flag.EXTENDED_FLAGS))
+                dest.writeByte((byte) ExtendedFlag.serialize(extendedFlags));
 
             if (flags.contains(Flag.VALUES))
                 CBUtil.writeValueList(options.getValues(), dest);
@@ -460,6 +586,9 @@ public abstract class QueryOptions
                 CBUtil.writeConsistencyLevel(options.getSerialConsistency(), dest);
             if (flags.contains(Flag.TIMESTAMP))
                 dest.writeLong(options.getSpecificOptions().timestamp);
+
+            if (extendedFlags.contains(ExtendedFlag.WITH_ASYNC_PAGING))
+                options.getAsyncPagingOptions().encode(dest, version);
 
             // Note that we don't really have to bother with NAMES_FOR_VALUES server side,
             // and in fact we never really encode QueryOptions, only decode them, so we
@@ -475,6 +604,10 @@ public abstract class QueryOptions
             EnumSet<Flag> flags = gatherFlags(options);
             size += 1;
 
+            EnumSet<ExtendedFlag> extendedFlags = gatherExtendedFlags(options);
+            if (flags.contains(Flag.EXTENDED_FLAGS))
+                size += 1;
+
             if (flags.contains(Flag.VALUES))
                 size += CBUtil.sizeOfValueList(options.getValues());
             if (flags.contains(Flag.PAGE_SIZE))
@@ -485,6 +618,9 @@ public abstract class QueryOptions
                 size += CBUtil.sizeOfConsistencyLevel(options.getSerialConsistency());
             if (flags.contains(Flag.TIMESTAMP))
                 size += 8;
+
+            if (extendedFlags.contains(ExtendedFlag.WITH_ASYNC_PAGING))
+                size += options.getAsyncPagingOptions().encodedSize(version);
 
             return size;
         }
@@ -504,6 +640,16 @@ public abstract class QueryOptions
                 flags.add(Flag.SERIAL_CONSISTENCY);
             if (options.getSpecificOptions().timestamp != Long.MIN_VALUE)
                 flags.add(Flag.TIMESTAMP);
+            if (options.getAsyncPagingOptions().asyncPagingRequested())
+                flags.add(Flag.EXTENDED_FLAGS);
+            return flags;
+        }
+
+        private EnumSet<ExtendedFlag> gatherExtendedFlags(QueryOptions options)
+        {
+            EnumSet<ExtendedFlag> flags = EnumSet.noneOf(ExtendedFlag.class);
+            if (options.getAsyncPagingOptions().asyncPagingRequested())
+                flags.add(ExtendedFlag.WITH_ASYNC_PAGING);
             return flags;
         }
     }

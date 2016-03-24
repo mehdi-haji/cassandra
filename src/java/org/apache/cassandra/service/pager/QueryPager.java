@@ -88,7 +88,8 @@ public interface QueryPager
      * {@code consistency} is a serial consistency.
      * @return the page of result.
      */
-    public PartitionIterator fetchPage(int pageSize, ConsistencyLevel consistency, ClientState clientState) throws RequestValidationException, RequestExecutionException;
+    public PartitionIterator fetchPage(int pageSize, ConsistencyLevel consistency, ClientState clientState)
+    throws RequestValidationException, RequestExecutionException;
 
     /**
      * Starts a new read operation.
@@ -102,13 +103,29 @@ public interface QueryPager
     public ReadExecutionController executionController();
 
     /**
-     * Fetches the next page internally (in other, this does a local query).
+     * Fetches the next page internally (in other words, this does a local query).
      *
      * @param pageSize the maximum number of elements to return in the next page.
      * @param executionController the {@code ReadExecutionController} protecting the read.
      * @return the page of result.
      */
-    public PartitionIterator fetchPageInternal(int pageSize, ReadExecutionController executionController) throws RequestValidationException, RequestExecutionException;
+    public PartitionIterator fetchPageInternal(int pageSize, ReadExecutionController executionController)
+    throws RequestValidationException, RequestExecutionException;
+
+    /**
+     * Fetches multiple pages internally (in other words, this does a local query). The last iteration
+     * status needs to be checked by the external clients by calling checkPageBoundaries() since
+     * unlike the single page cases, we cannot rely on the iteration to stop when a page is available.
+     *
+     * @param pageSize the maximum number of elements to return in the next page.
+     * @param executionController the {@code ReadExecutionController} protecting the read.
+     * @return an iterator over multiple pages that can be stopped externally or when all results are fetched.
+     */
+    default public PartitionIterator fetchMultiplePagesInternal(int pageSize, ReadExecutionController executionController)
+    throws RequestValidationException, RequestExecutionException
+    {
+        throw new UnsupportedOperationException(); // only AbstractQueryPager supports fetching multiple pages
+    }
 
     /**
      * Whether or not this pager is exhausted, i.e. whether or not a call to
@@ -117,6 +134,24 @@ public interface QueryPager
      * @return whether the pager is exhausted.
      */
     public boolean isExhausted();
+
+    /**
+     * If retrieving multiple pages, check if there is a page available for consumption.
+     *
+     * @return whether there is page available.
+     */
+    default public boolean checkPageBoundaries()
+    {
+        return false; // only AbstractQueryPager supports fetching multiple pages
+    }
+
+    /**
+     * If retrieving multiple pages, reset the internal counters and pagind state,
+     * so we can track the next page.
+     */
+    default public void reset()
+    {
+    }
 
     /**
      * The maximum number of cells/CQL3 row that we may still have to return.
@@ -128,7 +163,7 @@ public interface QueryPager
 
     /**
      * Get the current state of the pager. The state can allow to restart the
-     * paging on another host from where we are at this point.
+     * paging on another host or locally from where we are at this point.
      *
      * @return the current paging state. Will return null if paging is at the
      * beginning. If the pager is exhausted, the result is undefined.

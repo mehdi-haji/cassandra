@@ -41,6 +41,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.stream.ChunkedWriteHandler;
 import io.netty.util.Version;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.GlobalEventExecutor;
@@ -326,6 +327,10 @@ public class Server implements CassandraDaemon.Server
 
             pipeline.addLast("messageDecoder", messageDecoder);
             pipeline.addLast("messageEncoder", messageEncoder);
+
+            //handles ChunkedInput implementations by suspending transfer if
+            //the channel is not writable
+            pipeline.addLast("chunkedWriter", new ChunkedWriteHandler());
 
             if (server.eventExecutorGroup != null)
                 pipeline.addLast(server.eventExecutorGroup, "executor", dispatcher);

@@ -61,6 +61,18 @@ public interface CQLStatement
     public ResultMessage executeInternal(QueryState state, QueryOptions options) throws RequestValidationException, RequestExecutionException;
 
     /**
+     * Variant of execute that may decide to simply invoke execute to return a result as usual, or to only return an
+     * identifier and to push results to the client later on, see SelectStatement.
+     *
+     * @param state the current query state
+     * @param options options for this query (consistency, variables, pageSize, ...)
+     */
+    default public ResultMessage executeAsync(QueryState state, QueryOptions options) throws RequestValidationException, RequestExecutionException
+    {
+        return execute(state, options);
+    }
+
+    /**
      * Return an Iterable over all of the functions (both native and user-defined) used by any component
      * of the statement
      * @return functions all functions found (may contain duplicates)

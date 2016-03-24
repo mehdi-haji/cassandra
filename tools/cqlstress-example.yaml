@@ -102,7 +102,7 @@ queries:
 token_range_queries:
   all_columns_tr_query:
     columns: '*'
-    page_size: 5000
+    page_size_bytes: 10240
 
   value_tr_query:
     columns: value

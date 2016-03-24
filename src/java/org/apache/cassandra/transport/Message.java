@@ -100,7 +100,8 @@ public abstract class Message
         BATCH          (13, Direction.REQUEST,  BatchMessage.codec),
         AUTH_CHALLENGE (14, Direction.RESPONSE, AuthChallenge.codec),
         AUTH_RESPONSE  (15, Direction.REQUEST,  AuthResponse.codec),
-        AUTH_SUCCESS   (16, Direction.RESPONSE, AuthSuccess.codec);
+        AUTH_SUCCESS   (16, Direction.RESPONSE, AuthSuccess.codec),
+        CANCEL         (17, Direction.REQUEST,  CancelMessage.codec);
 
         public final int opcode;
         public final Direction direction;
@@ -121,7 +122,7 @@ public abstract class Message
             }
         }
 
-        private Type(int opcode, Direction direction, Codec<?> codec)
+        Type(int opcode, Direction direction, Codec<?> codec)
         {
             this.opcode = opcode;
             this.direction = direction;
@@ -255,6 +256,13 @@ public abstract class Message
         public List<String> getWarnings()
         {
             return warnings;
+        }
+
+        public void prepareForSending(int streamId, Connection connection)
+        {
+            setStreamId(streamId);
+            setWarnings(ClientWarn.instance.getWarnings());
+            attach(connection);
         }
     }
 
@@ -501,13 +509,11 @@ public abstract class Message
                 if (connection.getVersion() >= Server.VERSION_4)
                     ClientWarn.instance.captureWarnings();
 
-                QueryState qstate = connection.validateNewMessage(request.type, connection.getVersion(), request.getStreamId());
+                QueryState qstate = connection.validateNewMessage(request, connection.getVersion());
 
                 logger.trace("Received: {}, v={}", request, connection.getVersion());
                 response = request.execute(qstate);
-                response.setStreamId(request.getStreamId());
-                response.setWarnings(ClientWarn.instance.getWarnings());
-                response.attach(connection);
+                response.prepareForSending(request.getStreamId(), connection);
                 connection.applyStateTransition(request.type, response.type);
             }
             catch (Throwable t)

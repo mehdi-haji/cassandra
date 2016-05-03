@@ -91,6 +91,7 @@ class OneWayChannel(object):
         self.reader, self.writer = mp.Pipe(duplex=False)
         self.rlock = mp.Lock()
         self.wlock = mp.Lock()
+        self.init_lock = threading.Lock()
         self.feeding_thread = None
         self.pending_messages = None
 
@@ -99,27 +100,30 @@ class OneWayChannel(object):
         Initialize a thread that fetches messages from a queue and sends them to the channel.
         We initialize the feeding thread lazily to avoid the fork(), since the channels are passed to child processes.
         """
-        if self.feeding_thread is not None or self.pending_messages is not None:
-            raise RuntimeError("Feeding thread already initialized")
+        with self.init_lock:
+            if self.feeding_thread is not None:  # Another thread initialized it
+                if self.pending_messages is None:
+                    raise RuntimeError("Feeding thread already initialized but no message queue created")
+                return
 
-        self.pending_messages = Queue()
+            self.pending_messages = Queue()
 
-        def feed():
-            send = self._send
-            pending_messages = self.pending_messages
+            def feed():
+                send = self._send
+                pending_messages = self.pending_messages
 
-            while True:
-                try:
-                    msg = pending_messages.get()
-                    send(msg)
-                except Exception, e:
-                    printmsg('%s: %s' % (e.__class__.__name__, e.message))
+                while True:
+                    try:
+                        msg = pending_messages.get()
+                        send(msg)
+                    except Exception, e:
+                        printmsg('%s: %s' % (e.__class__.__name__, e.message))
 
-        feeding_thread = threading.Thread(target=feed)
-        feeding_thread.setDaemon(True)
-        feeding_thread.start()
+            feeding_thread = threading.Thread(target=feed)
+            feeding_thread.setDaemon(True)
+            feeding_thread.start()
 
-        self.feeding_thread = feeding_thread
+            self.feeding_thread = feeding_thread
 
     def send(self, obj):
         if self.feeding_thread is None:

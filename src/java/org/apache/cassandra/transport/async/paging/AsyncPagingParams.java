@@ -25,7 +25,7 @@ import org.apache.cassandra.transport.CBCodec;
 import org.apache.cassandra.transport.CBUtil;
 
 /**
- * The current status of an asynchrouns paging result.
+ * The current status of an asynchronous paging result.
  */
 public class AsyncPagingParams
 {

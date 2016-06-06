@@ -70,8 +70,11 @@ public class AsyncPagingTest extends CQLTester
                                                      .checkRows(true)
                                                      .build())
         {
-            helper.readEntireTableWithBulkPaging(1, 100);
-            helper.readEntireTableWithBulkPaging(1, 27);
+            helper.readEntireTableWithBulkPaging(1, 11000000); // should fit all rows
+            helper.readEntireTableWithBulkPaging(1, 11000); // should fit 10 rows
+            helper.readEntireTableWithBulkPaging(1, 110000); // should fit 100 rows
+            helper.readEntireTableWithBulkPaging(1, 1100); // should fit 1 row
+            helper.readEntireTableWithBulkPaging(1, 100); // should fit less than 1 row
         }
     }
 
@@ -84,11 +87,9 @@ public class AsyncPagingTest extends CQLTester
                                                      .checkRows(true)
                                                      .build())
         {
-            helper.readEntireTableWithBulkPaging(1, 100);
-            helper.readEntireTableWithBulkPaging(1, 1);
-            helper.readEntireTableWithBulkPaging(1, 25);
-            helper.readEntireTableWithBulkPaging(1, 150);
-            helper.readEntireTableWithBulkPaging(1, 101);
+            helper.readEntireTableWithBulkPaging(1, 11000000); // should fit all rows
+            helper.readEntireTableWithBulkPaging(1, 1100); // should fit 30 row
+            helper.readEntireTableWithBulkPaging(1, 10); // should fit less than 1 row
         }
     }
 
@@ -108,7 +109,7 @@ public class AsyncPagingTest extends CQLTester
                                                      .clientPauseMillis(10)
                                                      .build())
         {
-            helper.readEntireTableWithBulkPaging(1, 10);
+            helper.readEntireTableWithBulkPaging(1, 102400); // 1KB * 100 rows
         }
     }
 
@@ -123,10 +124,10 @@ public class AsyncPagingTest extends CQLTester
 
             //warmup
             helper.readEntireTablePageByPage(50, 100);
-            helper.readEntireTableWithBulkPaging(50, 102400); // 1KB * 100 rows
+            helper.readEntireTableWithBulkPaging(50, 104800); // row size * 100 rows
 
             logger.info("Total time reading 1KB table with bulk paging: {} milliseconds",
-                        helper.readEntireTableWithBulkPaging(500, 102400)); // 1KB * 100 rows
+                        helper.readEntireTableWithBulkPaging(500, 104800)); // row size * 100 rows
 
             logger.info("Total time reading 1KB table page by page: {} milliseconds",
                         helper.readEntireTablePageByPage(500, 100));
@@ -371,7 +372,7 @@ public class AsyncPagingTest extends CQLTester
             return (System.nanoTime() - start) / (1000000 * numTrials);
         }
 
-        private long readEntireTableWithBulkPaging(int numTrials, int pageSizeRows) throws Throwable
+        private long readEntireTableWithBulkPaging(int numTrials, int pageSizeBytes) throws Throwable
         {
             long start = System.nanoTime();
             for (int i = 0; i < numTrials; i++)
@@ -379,7 +380,7 @@ public class AsyncPagingTest extends CQLTester
                 Session session = tester.sessionNet(protocolVersion);
                 Statement statement = new SimpleStatement(tester.formatQuery("SELECT k, c, val1, val2 FROM %s"));
 
-                try(ResultSetIterator it = session.executeAsync(statement, AsyncPagingOptions.create(pageSizeRows)))
+                try(ResultSetIterator it = session.executeAsync(statement, AsyncPagingOptions.create(pageSizeBytes)))
                 {
                     //Schedule the conversions
                     List<CompletableFuture<?>> results = new ArrayList<>();

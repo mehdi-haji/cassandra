@@ -192,27 +192,76 @@ public class ResultSet
             return rs;
         }
 
+        /**
+         * Encode all the rows in the result set, including the header (metadata and num rows).
+         */
         public void encode(ResultSet rs, ByteBuf dest, int version)
         {
-            ResultMetadata.codec.encode(rs.metadata, dest, version);
-            dest.writeInt(rs.rows.size());
+            encodeHeader(rs.metadata, dest, rs.rows.size(), version);
             for (List<ByteBuffer> row : rs.rows)
+                encodeRow(row, rs.metadata, dest, false);
+        }
+
+        /**
+         * Write the header to the Netty byte buffer.
+         * @param metadata the result set metadata
+         * @param dest the Netty byte buffer
+         * @param numRows the number of rows
+         */
+        public void encodeHeader(ResultMetadata metadata, ByteBuf dest, int numRows, int version)
+        {
+            ResultMetadata.codec.encode(metadata, dest, version);
+            dest.writeInt(numRows);
+        }
+
+        /**
+         * Write the current row to the Netty byte buffer. If checkSpace is true, that means the Netty byte buffer
+         * was created with a fixed size and the current row may not fit so we do not write it if there isn't enough
+         * space. If it is false, it means we called encodedSize() to create the byte buffer and therefore we know
+         * there always be space. We could assert but this would be too penalizing in the critical path if people
+         * leave assertions on.
+         *
+         * Note that we do only want to serialize only the first columnCount values, even if the row
+         * has more: see comment on ResultMetadata.names field.
+         *
+         * @param row the current row
+         * @param metadata the result set metadata
+         * @param dest the Netty byte buffer
+         * @param checkSpace when true check if there is sufficient space in the Netty byte buffer.
+         * @return true if the row was written
+         */
+        public boolean encodeRow(List<ByteBuffer> row, ResultMetadata metadata, ByteBuf dest, boolean checkSpace)
+        {
+            for (int i = 0; i < metadata.columnCount; i++)
             {
-                // Note that we do only want to serialize only the first columnCount values, even if the row
-                // as more: see comment on ResultMetadata.names field.
-                for (int i = 0; i < rs.metadata.columnCount; i++)
-                    CBUtil.writeValue(row.get(i), dest);
+                if (checkSpace && dest.writableBytes() < CBUtil.sizeOfValue(row.get(i)))
+                    return false;
+
+                CBUtil.writeValue(row.get(i), dest);
             }
+
+            return true;
         }
 
         public int encodedSize(ResultSet rs, int version)
         {
-            int size = ResultMetadata.codec.encodedSize(rs.metadata, version) + 4;
+            int size = encodedHeaderSize(rs.metadata, version);
             for (List<ByteBuffer> row : rs.rows)
-            {
-                for (int i = 0; i < rs.metadata.columnCount; i++)
-                    size += CBUtil.sizeOfValue(row.get(i));
-            }
+                size += encodedRowSize(row, rs.metadata);
+
+            return size;
+        }
+
+        public int encodedHeaderSize(ResultMetadata metadata, int version)
+        {
+            return ResultMetadata.codec.encodedSize(metadata, version) + 4;
+        }
+
+        public int encodedRowSize(List<ByteBuffer> row, ResultMetadata metadata)
+        {
+            int size = 0;
+            for (int i = 0; i < metadata.columnCount; i++)
+                size += CBUtil.sizeOfValue(row.get(i));
             return size;
         }
     }

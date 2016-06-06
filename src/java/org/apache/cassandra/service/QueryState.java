@@ -126,4 +126,9 @@ public class QueryState
     {
         return clientState.connection;
     }
+
+    public UUID getPreparedTracingSession()
+    {
+        return preparedTracingSession;
+    }
 }

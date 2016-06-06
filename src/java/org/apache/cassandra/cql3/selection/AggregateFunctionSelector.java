@@ -22,7 +22,7 @@ import java.util.List;
 
 import org.apache.cassandra.cql3.functions.AggregateFunction;
 import org.apache.cassandra.cql3.functions.Function;
-import org.apache.cassandra.cql3.selection.Selection.ResultSetBuilder;
+import org.apache.cassandra.cql3.selection.Selection.RowBuilder;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
 final class AggregateFunctionSelector extends AbstractFunctionSelector<AggregateFunction>
@@ -34,7 +34,7 @@ final class AggregateFunctionSelector extends AbstractFunctionSelector<Aggregate
         return true;
     }
 
-    public void addInput(int protocolVersion, ResultSetBuilder rs) throws InvalidRequestException
+    public void addInput(int protocolVersion, RowBuilder rs) throws InvalidRequestException
     {
         // Aggregation of aggregation is not supported
         for (int i = 0, m = argSelectors.size(); i < m; i++)

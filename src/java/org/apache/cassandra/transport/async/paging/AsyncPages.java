@@ -29,43 +29,50 @@ import org.slf4j.LoggerFactory;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.stream.ChunkedInput;
 import io.netty.handler.stream.ChunkedWriteHandler;
-import org.apache.cassandra.cql3.ResultSet;
 import org.apache.cassandra.transport.Connection;
-import org.apache.cassandra.transport.messages.ResultMessage;
+import org.apache.cassandra.transport.Frame;
+import org.apache.cassandra.transport.Server;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 
-public class AsyncPages implements ChunkedInput<ResultMessage.Rows>
+/**
+ * A netty chunked input composed of a queue of pages. {@link AsyncPagingService} puts pages into this queue
+ * whilst a Netty ChunkWriteHandler called {@link Server#CHUNKED_WRITER} reads pages from this queue and writes
+ * them to the client, when it is ready to receive them, that is when the channel is writable.
+ */
+class AsyncPages implements ChunkedInput<Frame>
 {
     private static final Logger logger = LoggerFactory.getLogger(AsyncPages.class);
-    private static final int MAX_CONCURRENT_NUM_PAGES = 3; // max number of pending pages before we block
+    private static final int MAX_CONCURRENT_NUM_PAGES = 5; // max number of pending pages before we block
 
-    private final ArrayBlockingQueue<ResultMessage.Rows> pages;
+    private final ArrayBlockingQueue<Frame> pages;
     private final ChunkedWriteHandler handler;
     private final AtomicBoolean suspended = new AtomicBoolean(false);
     private final AtomicBoolean completed = new AtomicBoolean(false);
+    private final AtomicBoolean closed = new AtomicBoolean(false);
     private final AtomicInteger numSent = new AtomicInteger(0);
 
-    public AsyncPages(Connection connection)
+    AsyncPages(Connection connection)
     {
         this.pages = new ArrayBlockingQueue<>(MAX_CONCURRENT_NUM_PAGES);
-        this.handler = (ChunkedWriteHandler)connection.channel().pipeline().get("chunkedWriter");
+        this.handler = (ChunkedWriteHandler)connection.channel().pipeline().get(Server.CHUNKED_WRITER);
     }
 
-    /** Adds a page to the queue so that it can be sent later on when the channel is available.
+    /**
+     * Adds a page to the queue so that it can be sent later on when the channel is available.
      * This method will block for up to timeoutMillis if the queue if full.
      */
-    public boolean sendPage(ResultSet resultSet, long timeoutMillis)
+    boolean sendPage(Frame frame, boolean hasMorePages, long timeoutMillis)
     {
+        if (closed.get())
+            throw new RuntimeException("Chunked input was closed");
+
         try
         {
-            ResultMessage.Rows response = new ResultMessage.Rows(resultSet);
-            response.setStreamId(-1);
-
-            boolean ret = pages.offer(response, timeoutMillis, TimeUnit.MILLISECONDS);
+            boolean ret = pages.offer(frame, timeoutMillis, TimeUnit.MILLISECONDS);
             if (ret)
             {
                 maybeResumeTransfer();
-                if (!resultSet.metadata.hasMorePages())
+                if (!hasMorePages)
                 {
                     if (!completed.compareAndSet(false, true))
                         assert false : "Unexpected completed status";
@@ -88,29 +95,53 @@ public class AsyncPages implements ChunkedInput<ResultMessage.Rows>
 
     public void close() throws Exception
     {
-        logger.info("Closed: {}, {}, {}", pages.size(), completed, numSent.get());
-        pages.clear();
-    }
-
-    public ResultMessage.Rows readChunk(ChannelHandlerContext channelHandlerContext) throws Exception
-    {
-        ResultMessage.Rows response = pages.poll();
-        if (response == null)
-            suspendTransfer();
-        else
-            numSent.incrementAndGet();
-        return response;
-    }
-
-    private void suspendTransfer()
-    {
-        while (!suspended.get())
+        if (closed.compareAndSet(false, true))
         {
-            if (suspended.compareAndSet(false, true))
-                break;
+            logger.info("Closing chunked input, pending pages: {}, completed: {}, num sent: {}", pages.size(), completed, numSent.get());
+            pages.clear();
         }
     }
 
+    /**
+     * Removes a page from the queue and returns it to the caller, the chunked writer, which will write
+     * it to the client. We can return null to indicate there is nothing to read at the moment, but if
+     * we do this then we must call {@link this#maybeResumeTransfer()} later on when we do have something to read,
+     * for this reason we must set {@link this#suspended} to true if we return null.
+     *
+     * @return a page to write to the client, null if no page is available.
+     */
+    public Frame readChunk(ChannelHandlerContext channelHandlerContext) throws Exception
+    {
+        Frame response = pages.poll();
+        while (response == null)
+        {
+            if (isSuspended())
+                break;
+
+            response = pages.poll();
+        }
+        if (response != null)
+            numSent.incrementAndGet();
+
+        return response;
+    }
+
+    /**
+     * Try to set {@link this#suspended} to true.
+     *
+     * @return true if suspended is true, false otherwise
+     */
+    private boolean isSuspended()
+    {
+        suspended.compareAndSet(false, true);
+        return suspended.get();
+    }
+
+    /**
+     * Try to set {@link this#suspended} to false.
+     *
+     * If we succeed then call handler.resumeTransfer().
+     */
     private void maybeResumeTransfer()
     {
         while (suspended.get())

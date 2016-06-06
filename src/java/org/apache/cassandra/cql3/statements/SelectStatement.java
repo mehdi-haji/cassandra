@@ -763,7 +763,7 @@ public class SelectStatement implements CQLStatement
         return filter;
     }
 
-    public Selection.ResultSetBuilder getResultSetBuilder()
+    public Selection.ResultSetBuilder getResultSetBuilder(QueryOptions options)
     {
         return selection.resultSetBuilder(options, parameters.isJson);
     }
@@ -773,7 +773,7 @@ public class SelectStatement implements CQLStatement
                               int nowInSec,
                               int userLimit) throws InvalidRequestException
     {
-        Selection.ResultSetBuilder result = getResultSetBuilder();
+        Selection.ResultSetBuilder result = getResultSetBuilder(options);
         while (partitions.hasNext())
         {
             try (RowIterator partition = partitions.next())
@@ -805,7 +805,7 @@ public class SelectStatement implements CQLStatement
     }
 
     // Used by ModificationStatement for CAS operations
-    void processPartition(RowIterator partition, QueryOptions options, Selection.ResultSetBuilder result, int nowInSec)
+    void processPartition(RowIterator partition, QueryOptions options, Selection.RowBuilder result, int nowInSec)
     throws InvalidRequestException
     {
         int protocolVersion = options.getProtocolVersion();
@@ -819,14 +819,14 @@ public class SelectStatement implements CQLStatement
         if (!partition.hasNext())
         {
             if (!staticRow.isEmpty() && (!restrictions.hasClusteringColumnsRestriction() || cfm.isStaticCompactTable()))
-                result.newRow(protocolVersion);
+                result.newRow();
                 result.addStaticRow(staticRow, keyComponents, selection.getColumns(), nowInSec, protocolVersion);
 
             return;
         }
 
         while (partition.hasNext())
-            result.newRow(protocolVersion);
+            result.newRow();
             result.addRow(partition.next(), staticRow, keyComponents, selection.getColumns(), nowInSec, protocolVersion);
     }
 

@@ -22,7 +22,7 @@ import java.util.List;
 
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.functions.ScalarFunction;
-import org.apache.cassandra.cql3.selection.Selection.ResultSetBuilder;
+import org.apache.cassandra.cql3.selection.Selection.RowBuilder;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
 final class ScalarFunctionSelector extends AbstractFunctionSelector<ScalarFunction>
@@ -36,7 +36,7 @@ final class ScalarFunctionSelector extends AbstractFunctionSelector<ScalarFuncti
         return argSelectors.get(0).isAggregate();
     }
 
-    public void addInput(int protocolVersion, ResultSetBuilder rs) throws InvalidRequestException
+    public void addInput(int protocolVersion, RowBuilder rs) throws InvalidRequestException
     {
         for (int i = 0, m = argSelectors.size(); i < m; i++)
         {

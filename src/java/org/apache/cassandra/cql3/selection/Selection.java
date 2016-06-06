@@ -242,9 +242,9 @@ public abstract class Selection
         return columnMapping;
     }
 
-    public ResultSetBuilder resultSetBuilder(QueryOptions options, boolean isJons) throws InvalidRequestException
+    public ResultSetBuilder resultSetBuilder(QueryOptions options, boolean isJson) throws InvalidRequestException
     {
-        return new ResultSetBuilder(options, isJons);
+        return new ResultSetBuilder(options, isJson, this);
     }
 
     public abstract boolean isAggregate();
@@ -287,9 +287,21 @@ public abstract class Selection
         return Collections.singletonList(UTF8Type.instance.getSerializer().serialize(sb.toString()));
     }
 
-    public class ResultSetBuilder
+
+    /**
+     * CQL row builder: abstract class for converting filtered rows and cells into CQL rows.
+     *
+     * Store a CQL row into a list of byte buffers (would be nice to get rid of this), which can
+     * then be passed to {@link this#onRowCompleted(List)}, concrete implementations will convert this
+     * row into the desired encoded representation, e.g. they will add it to a ResultSet or write it to
+     * a Netty Byte Buffer.
+     */
+    public abstract static class RowBuilder
     {
-        private ResultSet resultSet;
+        /**
+         * The parent selection that created this row builder.
+         */
+        protected final Selection selection;
         private final int protocolVersion;
 
         /**
@@ -310,24 +322,16 @@ public abstract class Selection
         final long[] timestamps;
         final int[] ttls;
 
-        private final boolean isJson;
+        protected final boolean isJson;
 
-        private ResultSetBuilder(QueryOptions options, boolean isJson) throws InvalidRequestException
+        protected RowBuilder(QueryOptions options, boolean isJson, Selection selection) throws InvalidRequestException
         {
             this.protocolVersion = options.getProtocolVersion();
-            this.selectors = newSelectors();
-            this.timestamps = collectTimestamps ? new long[columns.size()] : null;
-            this.ttls = collectTTLs ? new int[columns.size()] : null;
+            this.selection = selection;
+            this.timestamps = selection.collectTimestamps ? new long[selection.columns.size()] : null;
+            this.ttls = selection.collectTTLs ? new int[selection.columns.size()] : null;
             this.isJson = isJson;
-
-            reset(options);
-        }
-
-        public void reset(QueryOptions options)
-        {
-            this.resultSet = new ResultSet(getResultMetadata(isJson).copy(), new ArrayList<List<ByteBuffer>>());
-			this.selectors = newSelectors(options);
-
+            this.selectors = selection.newSelectors(options);
             this.current = null;
 
             // We use MIN_VALUE to indicate no timestamp and -1 for no ttl
@@ -339,7 +343,7 @@ public abstract class Selection
 
         public void addRow(Row row, Row staticRow, ByteBuffer[] keyComponents, List<ColumnDefinition> columns, int nowInSec, int protocolVersion)
         {
-            newRow(protocolVersion);
+            newRow();
             // Respect selection order
             for (ColumnDefinition def : columns)
             {
@@ -363,7 +367,7 @@ public abstract class Selection
 
         public void addStaticRow(Row staticRow, ByteBuffer[] keyComponents, List<ColumnDefinition> columns, int nowInSec, int protocolVersion)
         {
-            newRow(protocolVersion);
+            newRow();
             for (ColumnDefinition def : columns)
             {
                 switch (def.kind)
@@ -375,7 +379,7 @@ public abstract class Selection
                         addCell(def, staticRow, nowInSec, protocolVersion);
                         break;
                     default:
-                        add((ByteBuffer)null);
+                        add(null);
                 }
             }
         }
@@ -444,35 +448,68 @@ public abstract class Selection
                 selectors.addInputRow(protocolVersion, this);
                 if (!selectors.isAggregate())
                 {
-                    resultSet.addRow(getOutputRow());
+                    onRowCompleted(getOutputRow());
                     selectors.reset();
                 }
             }
-            current = new ArrayList<>(columns.size());
+            current = new ArrayList<>(selection.columns.size());
         }
 
-        public ResultSet build() throws InvalidRequestException
+        protected void completeCurrentRow() throws InvalidRequestException
         {
             if (current != null)
             {
                 selectors.addInputRow(protocolVersion, this);
-                resultSet.addRow(getOutputRow());
+                onRowCompleted(getOutputRow());
                 selectors.reset();
                 current = null;
             }
 
-            if (resultSet.isEmpty() && selectors.isAggregate())
-                resultSet.addRow(getOutputRow());
-            return resultSet;
+            if (resultIsEmpty() && selectors.isAggregate())
+                onRowCompleted(getOutputRow());
         }
+
+        public abstract void onRowCompleted(List<ByteBuffer> row);
+        public abstract boolean resultIsEmpty();
 
         private List<ByteBuffer> getOutputRow()
         {
             List<ByteBuffer> outputRow = selectors.getOutputRow(protocolVersion);
-            return isJson ? rowToJson(outputRow, protocolVersion, metadata)
+            return isJson ? rowToJson(outputRow, protocolVersion, selection.metadata)
                           : outputRow;
         }
     }
+
+    /**
+     * Build a ResultSet by implementing the abstract methods of {@link Selection.RowBuilder}.
+     */
+    public final static class ResultSetBuilder extends RowBuilder
+    {
+        private ResultSet resultSet;
+
+        public ResultSetBuilder(QueryOptions options, boolean isJson, Selection selection)
+        {
+            super(options, isJson, selection);
+            this.resultSet = new ResultSet(selection.getResultMetadata(isJson).copy(), new ArrayList<>());
+        }
+
+        public void onRowCompleted(List<ByteBuffer> row)
+        {
+            resultSet.addRow(row);
+        }
+
+        public boolean resultIsEmpty()
+        {
+            return resultSet.isEmpty();
+        }
+
+        public ResultSet build() throws InvalidRequestException
+        {
+            completeCurrentRow();
+            return resultSet;
+        }
+    }
+
 
     private static interface Selectors
     {
@@ -484,7 +521,7 @@ public abstract class Selection
          * @param rs the <code>ResultSetBuilder</code>
          * @throws InvalidRequestException
          */
-        public void addInputRow(int protocolVersion, ResultSetBuilder rs) throws InvalidRequestException;
+        public void addInputRow(int protocolVersion, RowBuilder rs) throws InvalidRequestException;
 
         public List<ByteBuffer> getOutputRow(int protocolVersion) throws InvalidRequestException;
 
@@ -542,7 +579,7 @@ public abstract class Selection
                     return current;
                 }
 
-                public void addInputRow(int protocolVersion, ResultSetBuilder rs) throws InvalidRequestException
+                public void addInputRow(int protocolVersion, RowBuilder rs) throws InvalidRequestException
                 {
                     current = rs.current;
                 }
@@ -634,7 +671,7 @@ public abstract class Selection
                     return outputRow;
                 }
 
-                public void addInputRow(int protocolVersion, ResultSetBuilder rs) throws InvalidRequestException
+                public void addInputRow(int protocolVersion, RowBuilder rs) throws InvalidRequestException
                 {
                     for (Selector selector : selectors)
                         selector.addInput(protocolVersion, rs);

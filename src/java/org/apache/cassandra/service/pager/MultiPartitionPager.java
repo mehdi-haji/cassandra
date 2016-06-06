@@ -106,6 +106,12 @@ public class MultiPartitionPager implements QueryPager
         return true;
     }
 
+    public void saveState()
+    {
+        if (!isExhausted())
+            pagers[current].saveState();
+    }
+
     public ReadExecutionController executionController()
     {
         // Note that for all pagers, the only difference is the partition key to which it applies, so in practice we

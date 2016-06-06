@@ -68,6 +68,11 @@ public interface QueryPager
             return true;
         }
 
+        public void saveState()
+        {
+
+        }
+
         public int maxRemaining()
         {
             return 0;
@@ -136,17 +141,12 @@ public interface QueryPager
     public boolean isExhausted();
 
     /**
-     * If retrieving multiple pages, check if there is a page available for consumption.
-     *
-     * @return whether there is page available.
+     * Save the current paging state.
      */
-    default public boolean checkPageBoundaries()
-    {
-        return false; // only AbstractQueryPager supports fetching multiple pages
-    }
+    public void saveState();
 
     /**
-     * If retrieving multiple pages, reset the internal counters and pagind state,
+     * If retrieving multiple pages, reset the internal counters and paging state,
      * so we can track the next page.
      */
     default public void reset()

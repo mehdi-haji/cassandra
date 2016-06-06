@@ -183,15 +183,6 @@ abstract class AbstractQueryPager implements QueryPager
             return row;
         }
 
-        private boolean checkPageBoundaries()
-        {
-            if (!counter.isDoneForPartition())
-                return false;
-
-            saveState();
-            return true;
-        }
-
         private void reset()
         {
             counter.reset();
@@ -210,15 +201,10 @@ abstract class AbstractQueryPager implements QueryPager
         return exhausted || remaining == 0 || ((this instanceof SinglePartitionPager) && remainingInPartition == 0);
     }
 
-    /**
-     * Check if one page is available, if it is save the last iterated state even if the iteration is still
-     * ongoing.
-     * @return True if we have a full page available.
-     */
     @Override
-    public boolean checkPageBoundaries()
+    public void saveState()
     {
-        return internalPager.isPresent() ? internalPager.get().checkPageBoundaries() : false;
+        internalPager.ifPresent(Pager::saveState);
     }
 
     @Override

@@ -25,7 +25,7 @@ import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.functions.Function;
-import org.apache.cassandra.cql3.selection.Selection.ResultSetBuilder;
+import org.apache.cassandra.cql3.selection.Selection.RowBuilder;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
@@ -152,7 +152,7 @@ public abstract class Selector
      * @param rs the <code>ResultSetBuilder</code>
      * @throws InvalidRequestException if a problem occurs while add the input value
      */
-    public abstract void addInput(int protocolVersion, ResultSetBuilder rs) throws InvalidRequestException;
+    public abstract void addInput(int protocolVersion, RowBuilder rs) throws InvalidRequestException;
 
     /**
      * Returns the selector output.

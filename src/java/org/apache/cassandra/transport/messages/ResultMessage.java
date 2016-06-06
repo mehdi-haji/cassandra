@@ -198,16 +198,40 @@ public abstract class ResultMessage extends Message.Response
 
             public void encode(ResultMessage msg, ByteBuf dest, int version)
             {
-                assert msg instanceof Rows;
-                Rows rowMsg = (Rows)msg;
-                ResultSet.codec.encode(rowMsg.result, dest, version);
+                if (msg instanceof Rows)
+                {
+                    Rows rowMsg = (Rows) msg;
+                    ResultSet.codec.encode(rowMsg.result, dest, version);
+                }
+                else if (msg instanceof EncodedRows)
+                {
+                    EncodedRows rowMsg = (EncodedRows) msg;
+                    ResultSet.codec.encodeHeader(rowMsg.metadata, dest, rowMsg.numRows, version);
+                    dest.writeBytes(rowMsg.buff);
+                }
+                else
+                {
+                    assert false : "Unexpected message type";
+                }
             }
 
             public int encodedSize(ResultMessage msg, int version)
             {
-                assert msg instanceof Rows;
-                Rows rowMsg = (Rows)msg;
-                return ResultSet.codec.encodedSize(rowMsg.result, version);
+                if (msg instanceof Rows)
+                {
+                    Rows rowMsg = (Rows) msg;
+                    return ResultSet.codec.encodedSize(rowMsg.result, version);
+                }
+                else if (msg instanceof EncodedRows)
+                {
+                    EncodedRows rowMsg = (EncodedRows) msg;
+                    return ResultSet.codec.encodedHeaderSize(rowMsg.metadata, version) + rowMsg.buff.readableBytes();
+                }
+                else
+                {
+                    assert false : "Unexpected message type";
+                    return 0;
+                }
             }
         };
 
@@ -228,6 +252,32 @@ public abstract class ResultMessage extends Message.Response
         public String toString()
         {
             return "ROWS " + result;
+        }
+    }
+
+    public static class EncodedRows extends ResultMessage
+    {
+        public final ResultSet.ResultMetadata metadata;
+        public final int numRows;
+        public final ByteBuf buff;
+
+        public EncodedRows(ResultSet.ResultMetadata metadata, int numRows, ByteBuf buff)
+        {
+            super(Kind.ROWS);
+            this.metadata = metadata;
+            this.numRows = numRows;
+            this.buff = buff;
+        }
+
+        public CqlResult toThriftResult()
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public String toString()
+        {
+            return "ENCODED ROWS " + numRows;
         }
     }
 

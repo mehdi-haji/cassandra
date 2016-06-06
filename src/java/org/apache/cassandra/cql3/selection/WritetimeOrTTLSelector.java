@@ -22,7 +22,7 @@ import java.nio.ByteBuffer;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.ColumnSpecification;
-import org.apache.cassandra.cql3.selection.Selection.ResultSetBuilder;
+import org.apache.cassandra.cql3.selection.Selection.RowBuilder;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.LongType;
@@ -72,7 +72,7 @@ final class WritetimeOrTTLSelector extends Selector
         };
     }
 
-    public void addInput(int protocolVersion, ResultSetBuilder rs)
+    public void addInput(int protocolVersion, RowBuilder rs)
     {
         if (isSet)
             return;

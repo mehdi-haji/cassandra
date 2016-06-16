@@ -88,14 +88,14 @@ public class JavaDriverClient
 
     private LoadBalancingPolicy loadBalancingPolicy(StressSettings settings)
     {
-	    DCAwareRoundRobinPolicy.Builder policyBuilder = DCAwareRoundRobinPolicy.builder();
+        DCAwareRoundRobinPolicy.Builder policyBuilder = DCAwareRoundRobinPolicy.builder();
         if (settings.node.datacenter != null)
             policyBuilder.withLocalDc(settings.node.datacenter);
-			
+
         LoadBalancingPolicy ret = null;
-		if (settings.node.datacenter != null)
+        if (settings.node.datacenter != null)
             ret = policyBuilder.build();
-			
+
         if (settings.node.isWhiteList)
             ret = new WhiteListPolicy(ret == null ? policyBuilder.build() : ret, settings.node.resolveAll(settings.port.nativePort));
 

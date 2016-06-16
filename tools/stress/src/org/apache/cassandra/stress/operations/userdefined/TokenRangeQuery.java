@@ -54,7 +54,7 @@ public class TokenRangeQuery extends Operation
     private final TableMetadata tableMetadata;
     private final TokenRangeIterator tokenRangeIterator;
     private final String columns;
-    private final int pageSizeBytes;
+    private final int pageSize;
     private final boolean isWarmup;
     private final PrintWriter resultsWriter;
 
@@ -69,7 +69,7 @@ public class TokenRangeQuery extends Operation
         this.tableMetadata = tableMetadata;
         this.tokenRangeIterator = tokenRangeIterator;
         this.columns = sanitizeColumns(def.columns, tableMetadata);
-        this.pageSizeBytes = def.page_size_bytes;
+        this.pageSize = def.page_size;
         this.isWarmup = isWarmup;
         this.resultsWriter = maybeCreateResultsWriter(settings.tokenRange);
     }
@@ -266,8 +266,7 @@ public class TokenRangeQuery extends Operation
         private ResultSet fetchPages(State state) throws Exception
         {
             Statement statement = client.makeTokenRangeStatement(state.query, state.tokenRange);
-            state.resultSetIterator = client.getSession().executeAsync(statement,
-                                                                       AsyncPagingOptions.create(pageSizeBytes));
+            state.resultSetIterator = client.getSession().executeAsync(statement, AsyncPagingOptions.create(pageSize, AsyncPagingOptions.PageUnit.ROWS));
             return state.resultSetIterator.next();
         }
     }

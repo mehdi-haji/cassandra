@@ -111,7 +111,7 @@ public class Int32Type extends AbstractType<Integer>
     }
 
     @Override
-    protected int valueLengthIfFixed()
+    public int valueLengthIfFixed()
     {
         return 4;
     }

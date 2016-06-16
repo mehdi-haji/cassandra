@@ -63,6 +63,12 @@ public interface QueryPager
             return EmptyIterators.partition();
         }
 
+        public PartitionIterator fetchUpToLimitsInternal(ReadExecutionController executionController)
+        throws RequestValidationException, RequestExecutionException
+        {
+            return EmptyIterators.partition();
+        }
+
         public boolean isExhausted()
         {
             return true;
@@ -70,7 +76,10 @@ public interface QueryPager
 
         public void saveState()
         {
+        }
 
+        public void stop()
+        {
         }
 
         public int maxRemaining()
@@ -118,19 +127,14 @@ public interface QueryPager
     throws RequestValidationException, RequestExecutionException;
 
     /**
-     * Fetches multiple pages internally (in other words, this does a local query). The last iteration
-     * status needs to be checked by the external clients by calling checkPageBoundaries() since
-     * unlike the single page cases, we cannot rely on the iteration to stop when a page is available.
+     * Fetches rows until the limits are reached, without enforcing any paging, which is left to
+     * the result build.er
      *
-     * @param pageSize the maximum number of elements to return in the next page.
      * @param executionController the {@code ReadExecutionController} protecting the read.
-     * @return an iterator over multiple pages that can be stopped externally or when all results are fetched.
+     * @return a partition iterator that can either be stopped externally or when the limits are reached.
      */
-    default public PartitionIterator fetchMultiplePagesInternal(int pageSize, ReadExecutionController executionController)
-    throws RequestValidationException, RequestExecutionException
-    {
-        throw new UnsupportedOperationException(); // only AbstractQueryPager supports fetching multiple pages
-    }
+    public PartitionIterator fetchUpToLimitsInternal(ReadExecutionController executionController)
+    throws RequestValidationException, RequestExecutionException;
 
     /**
      * Whether or not this pager is exhausted, i.e. whether or not a call to
@@ -146,12 +150,9 @@ public interface QueryPager
     public void saveState();
 
     /**
-     * If retrieving multiple pages, reset the internal counters and paging state,
-     * so we can track the next page.
+     * Stop the iteration.
      */
-    default public void reset()
-    {
-    }
+    public void stop();
 
     /**
      * The maximum number of cells/CQL3 row that we may still have to return.

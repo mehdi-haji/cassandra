@@ -359,9 +359,11 @@ Table of Contents
               the paging options. Asynchronous paging can be interrupted via a CANCEL request.
               <paging_options> contains the following:
                 - <uuid>, a [UUID] that uniquely identifies an asynchronous paging session.
-                - <page_size>, an [Int] indicating the size of each page in bytes. This is a
-                  mandatory parameter that takes precendence over <result_page_size>, which is
-                  obsoleted by this parameter.
+
+                - <page_size>, an [Int] indicating the size of each page in the unit defined below.
+                  This is a mandatory parameter that takes precendence over <result_page_size>,
+                  which is obsoleted by this parameter.
+                - <page_unit>, an [Int] indicating the page unit: 1 indicates bytes and 2 indicates rows.
                 - <max_num_pages>, an [Int] indicating the maximum number of pages to
                   receive in total, set this to zero to indicate no limit.
                 - <pages_per_second>, an [Int] indicating the maximum number of pages to receive
@@ -475,8 +477,10 @@ Table of Contents
 
 4.1.9. CANCEL
 
-  Request to cancel an asynchronous operation. The body of the message is a [uuid]
-  that contains the unique identifier of the operation to cancel.
+  Request to cancel an asynchronous operation. The body of the message is:
+  - an [int] identifying the operation type:
+      - 1 for cancelling an async paging session
+  - a [uuid] that contains the unique identifier of the operation to cancel.
 
 4.2. Responses
 
@@ -647,8 +651,10 @@ Table of Contents
                              representing the number of values in the type, and <type_i>
                              are [option] representing the type of the i_th component
                              of the tuple
-        - <paging_params> contains the [uuid] that uniquely identifies the asynchronous paging session
-          and an [int] that identifies the sequential number of this result in the session.
+        - <paging_params> contains:
+           - a [uuid] that uniquely identifies the asynchronous paging session
+           - an [int] that identifies the sequential number of this result in the session
+           - a [boolean] that is true for the last message in the session
 
     - <rows_count> is an [int] representing the number of rows present in this
       result. Those rows are serialized in the <rows_content> part.

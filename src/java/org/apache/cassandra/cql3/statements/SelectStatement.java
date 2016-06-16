@@ -25,6 +25,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.auth.Permission;
+import org.apache.cassandra.concurrent.Stage;
+import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.*;
@@ -34,9 +36,13 @@ import org.apache.cassandra.cql3.selection.RawSelector;
 import org.apache.cassandra.cql3.selection.Selection;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.Int32Type;
+import org.apache.cassandra.db.marshal.UserType;
+import org.apache.cassandra.db.monitoring.ApproximateTime;
 import org.apache.cassandra.db.partitions.PartitionIterator;
+import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.view.View;
@@ -47,11 +53,11 @@ import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.QueryState;
-import org.apache.cassandra.service.pager.PagingState;
+import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.pager.QueryPager;
 import org.apache.cassandra.thrift.ThriftValidation;
 import org.apache.cassandra.transport.messages.ResultMessage;
-import org.apache.cassandra.transport.async.paging.AsyncPagingService;
+import org.apache.cassandra.cql3.async.paging.AsyncPagingService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -94,7 +100,7 @@ public class SelectStatement implements CQLStatement
     private final ColumnFilter queriedColumns;
 
     // Used by forSelection below
-    private static final Parameters defaultParameters = new Parameters(Collections.<ColumnDefinition.Raw, Boolean>emptyMap(), false, false, false);
+    private static final Parameters defaultParameters = new Parameters(Collections.emptyMap(), false, false, false);
 
     public SelectStatement(CFMetaData cfm,
                            int boundTerms,
@@ -219,57 +225,18 @@ public class SelectStatement implements CQLStatement
         cl.validateForRead(keyspace());
 
         if (options.getAsyncPagingOptions().asyncPagingRequested())
-            return AsyncPagingService.execute(this, state, options);
+            return innerExecuteAsync(state, options);
         else
-            return execute(state, options);
+            return innerExecute(state, options, false);
     }
 
     public ResultMessage.Rows execute(QueryState state, QueryOptions options)
         throws RequestExecutionException, RequestValidationException
     {
-        int nowInSec = FBUtilities.nowInSeconds();
-        int userLimit = getLimit(options);
-        int userPerPartitionLimit = getPerPartitionLimit(options);
-        ReadQuery query = getQuery(options, nowInSec, userLimit, userPerPartitionLimit);
-
-        int pageSize = getPageSize(options);
-        if (pageSize <= 0 || query.limits().count() <= pageSize)
-            return new ResultMessage.Rows(execute(query, options, state, nowInSec, userLimit));
-
-        QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
-        return new ResultMessage.Rows(execute(Pager.forDistributedQuery(pager,
-                                                                        options.getConsistency(),
-                                                                        state.getClientState()),
-                                              options,
-                                              pageSize,
-                                              nowInSec,
-                                              userLimit));
+       return innerExecute(state, options, false);
     }
 
-//    private boolean isOptimizedLocalQueryAllowed(QueryOptions options, int userLimit)
-//    {
-//        return isLocalOnly(options) && userLimit == DataLimits.NO_LIMIT && !selection.isAggregate() && !needsPostQueryOrdering());
-//    }
-
-    /**
-     * Check if the query can be executed locally, that is the key range is local and the consistency
-     * level is ONE or less.
-     */
-//    private boolean isLocalOnly(QueryOptions options)
-//    {
-//        Keyspace keyspace = Keyspace.open(cfm.ksName);
-//
-//        if (options.getConsistency().blockFor(keyspace) > 1)
-//            return false;
-//
-//        AbstractBounds<PartitionPosition> bounds = restrictions.getPartitionKeyBounds(options);
-//        if (bounds == null)
-//            return false; // empty query
-//
-//        return StorageProxy.isLocalRange(keyspace, bounds);
-//    }
-
-    public int getPageSize(QueryOptions options)
+    private int getPageSize(QueryOptions options)
     {
         int pageSize = options.getPageSize();
 
@@ -287,7 +254,7 @@ public class SelectStatement implements CQLStatement
         return getQuery(options, nowInSec, getLimit(options), getPerPartitionLimit(options));
     }
 
-    public ReadQuery getQuery(QueryOptions options, int nowInSec, int userLimit, int perPartitionLimit) throws RequestValidationException
+    private ReadQuery getQuery(QueryOptions options, int nowInSec, int userLimit, int perPartitionLimit) throws RequestValidationException
     {
         DataLimits limit = getDataLimits(userLimit, perPartitionLimit);
         if (restrictions.isKeyRange() || restrictions.usesSecondaryIndexing())
@@ -296,114 +263,329 @@ public class SelectStatement implements CQLStatement
         return getSliceCommands(options, limit, nowInSec);
     }
 
-    private ResultSet execute(ReadQuery query,
-                              QueryOptions options,
-                              QueryState state,
-                              int nowInSec,
-                              int userLimit) throws RequestValidationException, RequestExecutionException
+    /**
+     * Stores the parameters required to build an Executor and decides which type of executor to build.
+     */
+    private final static class ExecutorBuilder
     {
-        try (PartitionIterator data = query.execute(options.getConsistency(), state.getClientState()))
+        private final SelectStatement statement;
+        private final QueryOptions options;
+        private final QueryState state;
+        private final int nowInSec;
+        private final int userLimit;
+        private final int userPerPartitionLimit;
+
+        ExecutorBuilder(SelectStatement statement, QueryOptions options, QueryState state)
         {
-            return process(data, options, nowInSec, userLimit);
+            this.statement = statement;
+            this.options = options;
+            this.state = state;
+            this.nowInSec = FBUtilities.nowInSeconds();
+            this.userLimit = statement.getLimit(options);
+            this.userPerPartitionLimit = statement.getPerPartitionLimit(options);
+        }
+
+        public ReadQuery getQuery()
+        {
+            return statement.getQuery(options, nowInSec, userLimit, userPerPartitionLimit);
+        }
+
+        public Executor build(boolean forceLocal)
+        {
+            if (forceLocal || isLocalQuery(statement, options))
+                return new LocalExecutor(this);
+
+            return new DistributedExecutor(this);
+        }
+
+//        /**
+//         * Check if this is a simple and local query, where simple means: non-aggregate simple SELECTION, no user limit,
+//         * no post query ordering, basically a local token range query as described in CASSANDRA-9259.
+//         *
+//         * @return true if the query is local and simple.
+//         */
+//        private static boolean isLocalSimpleQuery(SelectStatement statement, QueryOptions options, int userLimit)
+//        {
+//            return isLocalQuery(statement, options) &&
+//                   userLimit == DataLimits.NO_LIMIT &&
+//                   !statement.selection.isAggregate() &&
+//                   !statement.needsPostQueryOrdering();
+//        }
+
+        /**
+         * Check if the query can be executed locally, that is the key range is local and the consistency
+         * level is ONE or less.
+         */
+        private static boolean isLocalQuery(SelectStatement statement, QueryOptions options)
+        {
+            Keyspace keyspace = Keyspace.open(statement.cfm.ksName);
+
+            if (options.getConsistency().blockFor(keyspace) > 1)
+                return false;
+
+            AbstractBounds<PartitionPosition> bounds = statement.restrictions.getPartitionKeyBounds(options);
+            if (bounds == null)
+                return false; // empty query
+
+            return StorageProxy.isLocalRange(keyspace, bounds);
         }
     }
 
-    // Simple wrapper class to avoid some code duplication
-    private static abstract class Pager
+    /**
+     * A class for executing queries: ReadQuery and QueryPager are used to read results in different ways
+     * and the results are then passed to a Selection.RowBuilder for further processing and filtering.
+     */
+    public static abstract class Executor
     {
-        protected QueryPager pager;
+        final SelectStatement statement;
+        final QueryOptions options;
+        final QueryState state;
+        final int nowInSec;
+        final int userLimit;
+        final ReadQuery query;
 
-        protected Pager(QueryPager pager)
+        private Executor(ExecutorBuilder builder)
         {
-            this.pager = pager;
+            this.statement = builder.statement;
+            this.options = builder.options;
+            this.state = builder.state;
+            this.nowInSec = builder.nowInSec;
+            this.userLimit = builder.userLimit;
+            this.query = builder.getQuery();
         }
 
-        public static Pager forInternalQuery(QueryPager pager, ReadExecutionController executionController)
+        /**
+         * A interface implemented by the callers of the retrieve page(s) methods, they need
+         * to pass in a valid page size and a valid result builder.
+         */
+        public interface PagingFactory
         {
-            return new InternalPager(pager, executionController);
+            /** Given a pater, return a result builder */
+            public Selection.RowBuilder builder(QueryPager pager);
+
+            /** Return the page size */
+            public int pageSize();
+
         }
 
-        public static Pager forDistributedQuery(QueryPager pager, ConsistencyLevel consistency, ClientState clientState)
+        /**
+         * Execute the entire query without any paging.
+         *
+         * @param builder - the result builder
+         */
+        public abstract void retrieveAll(Selection.RowBuilder builder)
+        throws RequestValidationException, RequestExecutionException;
+
+        /**
+         * Retrieve only a single page of this query.
+         *
+         * @param factory - a factory class to pass all external parameters that the executor cannot work out
+         */
+        public abstract void retrieveOnePage(PagingFactory factory)
+        throws RequestValidationException, RequestExecutionException;
+
+        /**
+         * Retrieve one or more pages, of this query, including all pages.
+         *
+         * @param factory - a factory class to pass all external parameters that the executor cannot work out
+         */
+        public abstract void retrieveMultiplePages(PagingFactory factory)
+        throws RequestValidationException, RequestExecutionException;
+
+        /**
+         * Iterate the results and pass them to the builder by calling statement.processPartition().
+         *
+         * @param partitions - the partitions to iterate.
+         * @throws InvalidRequestException
+         */
+        void process(PartitionIterator partitions, Selection.RowBuilder builder) throws InvalidRequestException
         {
-            return new NormalPager(pager, consistency, clientState);
-        }
-
-        public boolean isExhausted()
-        {
-            return pager.isExhausted();
-        }
-
-        public PagingState state()
-        {
-            return pager.state();
-        }
-
-        public abstract PartitionIterator fetchPage(int pageSize);
-
-        public static class NormalPager extends Pager
-        {
-            private final ConsistencyLevel consistency;
-            private final ClientState clientState;
-
-            private NormalPager(QueryPager pager, ConsistencyLevel consistency, ClientState clientState)
+            while (partitions.hasNext())
             {
-                super(pager);
-                this.consistency = consistency;
-                this.clientState = clientState;
-            }
-
-            public PartitionIterator fetchPage(int pageSize)
-            {
-                return pager.fetchPage(pageSize, consistency, clientState);
-            }
-        }
-
-        public static class InternalPager extends Pager
-        {
-            private final ReadExecutionController executionController;
-
-            private InternalPager(QueryPager pager, ReadExecutionController executionController)
-            {
-                super(pager);
-                this.executionController = executionController;
-            }
-
-            public PartitionIterator fetchPage(int pageSize)
-            {
-                return pager.fetchPageInternal(pageSize, executionController);
+                try (RowIterator partition = partitions.next())
+                {
+                    statement.processPartition(partition, options, builder, nowInSec);
+                }
             }
         }
     }
 
-    private ResultSet execute(Pager pager,
-                              QueryOptions options,
-                              int pageSize,
-                              int nowInSec,
-                              int userLimit) throws RequestValidationException, RequestExecutionException
+    /**
+     * An implementation of the executor that executes queries by distributing requests and
+     * collecting results via StorageProxy, this is the standard read path.
+     */
+    private static class DistributedExecutor extends Executor
+    {
+        private DistributedExecutor(ExecutorBuilder params)
+        {
+            super(params);
+        }
+
+        public void retrieveAll(Selection.RowBuilder builder) throws RequestValidationException, RequestExecutionException
+        {
+            try (PartitionIterator data = query.execute(options.getConsistency(), state.getClientState()))
+            {
+                process(data, builder);
+            }
+
+            builder.complete();
+        }
+
+        public void retrieveOnePage(PagingFactory factory) throws RequestValidationException, RequestExecutionException
+        {
+            QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
+            Selection.RowBuilder builder = factory.builder(pager);
+            try (PartitionIterator page = pager.fetchPage(factory.pageSize(), options.getConsistency(), state.getClientState()))
+            {
+                process(page, builder);
+            }
+
+            if (!pager.isExhausted())
+                builder.setHasMorePages(pager.state());
+
+            builder.complete();
+        }
+
+        public void retrieveMultiplePages(PagingFactory factory) throws RequestValidationException, RequestExecutionException
+        {
+            QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
+            Selection.RowBuilder builder = factory.builder(pager);
+            while (!pager.isExhausted() && !builder.isCompleted())
+            {
+                try (PartitionIterator page = pager.fetchPage(factory.pageSize(), options.getConsistency(), state.getClientState()))
+                {
+                    process(page, builder);
+                }
+            }
+
+            if (!pager.isExhausted())
+                builder.setHasMorePages(pager.state());
+
+            if (!builder.isCompleted())
+                builder.complete();
+        }
+    }
+
+    /**
+     * An implementation of the Executor that executes queries only locally, and bypassing StorageProxy.
+     * This is a local optimized query used by {@link SelectStatement#executeInternal(QueryState, QueryOptions)}
+     * or for very simple local queries that can be optimized not only by bypassing storage proxy but also by
+     * "dumping" results into a byte buffer without any reordering, aggregation or transformation to be applied
+     * to the columns, basically to extract local data as fast as possible for co-located analytics tools, see
+     * CASSANDRA-9259 and CASSANDRA-11521 for more details.
+     */
+    private static class LocalExecutor extends Executor
+    {
+        /**
+         * The maximum time we keep an iteration open before breaking when the next page boundary is encountered.
+         * This is required to ensure we periodically release the execution controller therefore allowing memtables
+         * to be flushed and sstables to be deleted if they've been compacted in the meantime.
+         */
+        private final static long MAX_ITERATION_TIME_MILLIS = 5000;
+
+        private LocalExecutor(ExecutorBuilder params)
+        {
+            super(params);
+        }
+
+        public void retrieveAll(Selection.RowBuilder builder) throws RequestValidationException, RequestExecutionException
+        {
+            try (ReadExecutionController executionController = query.executionController())
+            {
+                try (PartitionIterator data = query.executeInternal(executionController))
+                {
+                    process(data, builder);
+                }
+            }
+
+            builder.complete();
+        }
+
+        public void retrieveOnePage(PagingFactory factory) throws RequestValidationException, RequestExecutionException
+        {
+            QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
+            Selection.RowBuilder builder = factory.builder(pager);
+            try (ReadExecutionController executionController = query.executionController();
+                 PartitionIterator page = pager.fetchPageInternal(factory.pageSize(), executionController))
+            {
+                process(page, builder);
+            }
+
+            if (!pager.isExhausted())
+                builder.setHasMorePages(pager.state());
+
+            builder.complete();
+        }
+
+        public void retrieveMultiplePages(PagingFactory factory) throws RequestValidationException, RequestExecutionException
+        {
+            QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
+            Selection.RowBuilder builder = factory.builder(pager);
+            while (!pager.isExhausted() && !builder.isCompleted())
+            {
+                long now = ApproximateTime.currentTimeMillis();
+                try (ReadExecutionController executionController = query.executionController();
+                     PartitionIterator partitions = pager.fetchUpToLimitsInternal(executionController))
+                {
+                    while (partitions.hasNext())
+                    {
+                        try (RowIterator data = partitions.next())
+                        {
+                            statement.processPartition(data, options, builder, nowInSec);
+                        }
+
+                        if (ApproximateTime.currentTimeMillis() - now > MAX_ITERATION_TIME_MILLIS)
+                        {
+                            logger.info("Pausing long running multiple pages query to release resources");
+                            pager.stop(); // cannot just break or pager will think it was exhausted
+                        }
+                    }
+                }
+            }
+
+            if (!pager.isExhausted())
+                builder.setHasMorePages(pager.state());
+
+            if (!builder.isCompleted())
+                builder.complete();
+        }
+    }
+
+    private Executor.PagingFactory pagingFactory(final Selection.RowBuilder builder, final int pageSize)
+    {
+        return new Executor.PagingFactory()
+        {
+            public Selection.RowBuilder builder(QueryPager pager)
+            {
+                return builder;
+            }
+
+            public int pageSize()
+            {
+                return pageSize;
+            }
+        };
+    }
+
+    private ResultSet pageQuery(Executor executor, int pageSize)
+    throws RequestValidationException, RequestExecutionException
     {
         if (selection.isAggregate())
-            return pageAggregateQuery(pager, options, pageSize, nowInSec);
+            return pageAggregateQuery(executor, pageSize);
 
         // We can't properly do post-query ordering if we page (see #6722)
         checkFalse(needsPostQueryOrdering(),
-                  "Cannot page queries with both ORDER BY and a IN restriction on the partition key;"
-                  + " you must either remove the ORDER BY or the IN and sort client side, or disable paging for this query");
+                   "Cannot page queries with both ORDER BY and a IN restriction on the partition key;"
+                   + " you must either remove the ORDER BY or the IN and sort client side, or disable paging for this query");
 
-        ResultSet ret;
-        try (PartitionIterator page = pager.fetchPage(pageSize))
-        {
-            ret = process(page, options, nowInSec, userLimit);
-        }
-
-        // Please note that the isExhausted state of the pager only gets updated when we've closed the page, so this
-        // shouldn't be moved inside the 'try' above.
-        if (!pager.isExhausted())
-            ret.metadata.setHasMorePages(pager.state());
+        Selection.ResultSetBuilder builder = selection.resultSetBuilder(executor.options, parameters.isJson);
+        executor.retrieveOnePage(pagingFactory(builder, pageSize));
+        ResultSet ret = postQueryProcessing(builder, executor.userLimit);
 
         return ret;
     }
 
-    private ResultSet pageAggregateQuery(Pager pager, QueryOptions options, int pageSize, int nowInSec)
+    private ResultSet pageAggregateQuery(Executor executor, int pageSize)
     throws RequestValidationException, RequestExecutionException
     {
         if (!restrictions.hasPartitionKeyRestrictions())
@@ -417,60 +599,62 @@ public class SelectStatement implements CQLStatement
             ClientWarn.instance.warn("Aggregation query used on multiple partition keys (IN restriction)");
         }
 
-        Selection.ResultSetBuilder result = selection.resultSetBuilder(options, parameters.isJson);
-        while (!pager.isExhausted())
-        {
-            try (PartitionIterator iter = pager.fetchPage(pageSize))
-            {
-                while (iter.hasNext())
-                {
-                    try (RowIterator partition = iter.next())
-                    {
-                        processPartition(partition, options, result, nowInSec);
-                    }
-                }
-            }
-        }
-        return result.build();
-    }
-
-    private ResultMessage.Rows processResults(PartitionIterator partitions,
-                                              QueryOptions options,
-                                              int nowInSec,
-                                              int userLimit) throws RequestValidationException
-    {
-        ResultSet rset = process(partitions, options, nowInSec, userLimit);
-        return new ResultMessage.Rows(rset);
+        Selection.ResultSetBuilder builder = selection.resultSetBuilder(executor.options, parameters.isJson);
+        executor.retrieveMultiplePages(pagingFactory(builder, pageSize));
+        return builder.build();
     }
 
     public ResultMessage.Rows executeInternal(QueryState state, QueryOptions options)
     throws RequestExecutionException, RequestValidationException
     {
-        return executeInternal(state, options, FBUtilities.nowInSeconds());
+        return innerExecute(state, options, true);
     }
 
-    public ResultMessage.Rows executeInternal(QueryState state, QueryOptions options, int nowInSec) throws RequestExecutionException, RequestValidationException
+    /**
+     * Execute the query synchronously, typically we only retrieve one page.
+     * @param state - the query state
+     * @param options - the query options
+     * @param isInternal - set to true when we are called from executeInternal, indicates that the query is only local
+     * @return - a message containing the result rows
+     * @throws RequestExecutionException
+     * @throws RequestValidationException
+     */
+    private ResultMessage.Rows innerExecute(QueryState state, QueryOptions options, boolean isInternal)
+    throws RequestExecutionException, RequestValidationException
     {
-        int userLimit = getLimit(options);
-        int userPerPartitionLimit = getPerPartitionLimit(options);
-        ReadQuery query = getQuery(options, nowInSec, userLimit, userPerPartitionLimit);
-        int pageSize = getPageSize(options);
+        Executor executor = new ExecutorBuilder(this, options, state).build(isInternal);
 
-        try (ReadExecutionController executionController = query.executionController())
+        int pageSize = getPageSize(options);
+        if (pageSize <= 0 || executor.query.limits().count() <= pageSize)
         {
-            if (pageSize <= 0 || query.limits().count() <= pageSize)
-            {
-                try (PartitionIterator data = query.executeInternal(executionController))
-                {
-                    return processResults(data, options, nowInSec, userLimit);
-                }
-            }
-            else
-            {
-                QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
-                return new ResultMessage.Rows(execute(Pager.forInternalQuery(pager, executionController), options, pageSize, nowInSec, userLimit));
-            }
+            Selection.ResultSetBuilder builder = selection.resultSetBuilder(options, parameters.isJson);
+            executor.retrieveAll(builder);
+            return new ResultMessage.Rows(postQueryProcessing(builder, executor.userLimit));
         }
+
+        return new ResultMessage.Rows(pageQuery(executor, pageSize));
+    }
+
+    /**
+     * Execute the query asynchronously, typically retrieving multiple pages and sending them asynchronously
+     * as soon as they become available.
+     *
+     * @param state - the query state
+     * @param options - the query options
+     * @return - a void message, the results will be sent asynchronously by the async paging service
+     * @throws RequestExecutionException
+     * @throws RequestValidationException
+     */
+    private ResultMessage innerExecuteAsync(QueryState state, QueryOptions options)
+    throws RequestValidationException, RequestExecutionException
+    {
+        checkFalse(needsPostQueryOrdering(),
+                   "Cannot page queries with both ORDER BY and a IN restriction on the partition key;"
+                   + " you must either remove the ORDER BY or the IN and sort client side, or avoid async paging for this query");
+
+        Executor executor = new ExecutorBuilder(this, options, state).build(false);
+        StageManager.getStage(Stage.READ).execute(() -> executor.retrieveMultiplePages(AsyncPagingService.pagingFactory(this, state, options)));
+        return new ResultMessage.Void();
     }
 
     public ResultSet process(PartitionIterator partitions, int nowInSec) throws InvalidRequestException
@@ -714,7 +898,7 @@ public class SelectStatement implements CQLStatement
      * @return the per partition limit specified by the user or <code>DataLimits.NO_LIMIT</code> if no value
      * as been specified.
      */
-    public int getPerPartitionLimit(QueryOptions options)
+    private int getPerPartitionLimit(QueryOptions options)
     {
         return getLimit(perPartitionLimit, options);
     }
@@ -755,15 +939,14 @@ public class SelectStatement implements CQLStatement
     /**
      * May be used by custom QueryHandler implementations
      */
-    public RowFilter getRowFilter(QueryOptions options) throws InvalidRequestException
+    private RowFilter getRowFilter(QueryOptions options) throws InvalidRequestException
     {
         ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(columnFamily());
         SecondaryIndexManager secondaryIndexManager = cfs.indexManager;
-        RowFilter filter = restrictions.getRowFilter(secondaryIndexManager, options);
-        return filter;
+        return restrictions.getRowFilter(secondaryIndexManager, options);
     }
 
-    public Selection.ResultSetBuilder getResultSetBuilder(QueryOptions options)
+    private Selection.ResultSetBuilder getResultSetBuilder(QueryOptions options)
     {
         return selection.resultSetBuilder(options, parameters.isJson);
     }
@@ -782,6 +965,11 @@ public class SelectStatement implements CQLStatement
             }
         }
 
+        return postQueryProcessing(result, userLimit);
+    }
+
+    private ResultSet postQueryProcessing(Selection.ResultSetBuilder result, int userLimit)
+    {
         ResultSet cqlRows = result.build();
 
         orderResults(cqlRows);
@@ -805,7 +993,7 @@ public class SelectStatement implements CQLStatement
     }
 
     // Used by ModificationStatement for CAS operations
-    void processPartition(RowIterator partition, QueryOptions options, Selection.RowBuilder result, int nowInSec)
+    public void processPartition(RowIterator partition, QueryOptions options, Selection.RowBuilder result, int nowInSec)
     throws InvalidRequestException
     {
         int protocolVersion = options.getProtocolVersion();
@@ -819,15 +1007,69 @@ public class SelectStatement implements CQLStatement
         if (!partition.hasNext())
         {
             if (!staticRow.isEmpty() && (!restrictions.hasClusteringColumnsRestriction() || cfm.isStaticCompactTable()))
+            {
                 result.newRow();
-                result.addStaticRow(staticRow, keyComponents, selection.getColumns(), nowInSec, protocolVersion);
-
+                for (ColumnDefinition def : selection.getColumns())
+                {
+                    switch (def.kind)
+                    {
+                        case PARTITION_KEY:
+                            result.add(keyComponents[def.position()]);
+                            break;
+                        case STATIC:
+                            addValue(result, def, staticRow, nowInSec, protocolVersion);
+                            break;
+                        default:
+                            result.add(null);
+                    }
+                }
+            }
             return;
         }
 
         while (partition.hasNext())
+        {
+            Row row = partition.next();
             result.newRow();
-            result.addRow(partition.next(), staticRow, keyComponents, selection.getColumns(), nowInSec, protocolVersion);
+            // Respect selection order
+            for (ColumnDefinition def : selection.getColumns())
+            {
+                switch (def.kind)
+                {
+                    case PARTITION_KEY:
+                        result.add(keyComponents[def.position()]);
+                        break;
+                    case CLUSTERING:
+                        result.add(row.clustering().get(def.position()));
+                        break;
+                    case REGULAR:
+                        addValue(result, def, row, nowInSec, protocolVersion);
+                        break;
+                    case STATIC:
+                        addValue(result, def, staticRow, nowInSec, protocolVersion);
+                        break;
+                }
+            }
+        }
+    }
+
+    private static void addValue(Selection.RowBuilder result, ColumnDefinition def, Row row, int nowInSec, int protocolVersion)
+    {
+        if (def.isComplex())
+        {
+            assert def.type.isMultiCell();
+            ComplexColumnData complexData = row.getComplexColumnData(def);
+            if (complexData == null)
+                result.add(null);
+            else if (def.type.isCollection())
+                result.add(((CollectionType) def.type).serializeForNativeProtocol(complexData.iterator(), protocolVersion));
+            else
+                result.add(((UserType) def.type).serializeForNativeProtocol(complexData.iterator(), protocolVersion));
+        }
+        else
+        {
+            result.add(row.getCell(def), nowInSec);
+        }
     }
 
     private boolean needsPostQueryOrdering()
@@ -839,7 +1081,7 @@ public class SelectStatement implements CQLStatement
     /**
      * Orders results when multiple keys are selected (using IN)
      */
-    public void orderResults(ResultSet cqlRows)
+    private void orderResults(ResultSet cqlRows)
     {
         if (cqlRows.size() == 0 || !needsPostQueryOrdering())
             return;

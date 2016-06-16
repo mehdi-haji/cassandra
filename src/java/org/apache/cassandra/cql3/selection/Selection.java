@@ -29,14 +29,14 @@ import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.functions.Function;
-import org.apache.cassandra.db.marshal.CollectionType;
-import org.apache.cassandra.db.marshal.UserType;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.db.marshal.UTF8Type;
-import org.apache.cassandra.db.rows.ComplexColumnData;
-import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.service.pager.PagingState;
+import org.apache.cassandra.transport.CBUtil;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public abstract class Selection
@@ -127,6 +127,20 @@ public abstract class Selection
                 return true;
 
         return false;
+    }
+
+    /** Return an estimated size of a CQL row.
+     *
+     * @return - an estimated size of a CQL row
+     */
+    public int estimatedRowSize()
+    {
+        ColumnFamilyStore cfs = Keyspace.open(cfm.ksName).getColumnFamilyStore(cfm.cfName);
+        int ret = 0;
+        for (ColumnDefinition def : getColumns())
+            ret += ResultSet.codec.sizeOfValue(ByteBuffer.allocate(def.estimatedSize(cfs)));
+
+        return ret;
     }
 
     public ResultSet.ResultMetadata getResultMetadata(boolean isJson)
@@ -308,7 +322,7 @@ public abstract class Selection
          * As multiple thread can access a <code>Selection</code> instance each <code>ResultSetBuilder</code> will use
          * its own <code>Selectors</code> instance.
          */
-        private Selectors selectors;
+        private final Selectors selectors;
 
         /*
          * We'll build CQL3 row one by one.
@@ -323,84 +337,22 @@ public abstract class Selection
         final int[] ttls;
 
         protected final boolean isJson;
+        protected boolean completed;
 
         protected RowBuilder(QueryOptions options, boolean isJson, Selection selection) throws InvalidRequestException
         {
-            this.protocolVersion = options.getProtocolVersion();
             this.selection = selection;
+            this.protocolVersion = options.getProtocolVersion();
+            this.selectors = selection.newSelectors(options);
             this.timestamps = selection.collectTimestamps ? new long[selection.columns.size()] : null;
             this.ttls = selection.collectTTLs ? new int[selection.columns.size()] : null;
             this.isJson = isJson;
-            this.selectors = selection.newSelectors(options);
-            this.current = null;
 
             // We use MIN_VALUE to indicate no timestamp and -1 for no ttl
             if (timestamps != null)
                 Arrays.fill(timestamps, Long.MIN_VALUE);
             if (ttls != null)
                 Arrays.fill(ttls, -1);
-        }
-
-        public void addRow(Row row, Row staticRow, ByteBuffer[] keyComponents, List<ColumnDefinition> columns, int nowInSec, int protocolVersion)
-        {
-            newRow();
-            // Respect selection order
-            for (ColumnDefinition def : columns)
-            {
-                switch (def.kind)
-                {
-                    case PARTITION_KEY:
-                        add(keyComponents[def.position()]);
-                        break;
-                    case CLUSTERING:
-                        add(row.clustering().get(def.position()));
-                        break;
-                    case REGULAR:
-                        addCell(def, row, nowInSec, protocolVersion);
-                        break;
-                    case STATIC:
-                        addCell(def, staticRow, nowInSec, protocolVersion);
-                        break;
-                }
-            }
-        }
-
-        public void addStaticRow(Row staticRow, ByteBuffer[] keyComponents, List<ColumnDefinition> columns, int nowInSec, int protocolVersion)
-        {
-            newRow();
-            for (ColumnDefinition def : columns)
-            {
-                switch (def.kind)
-                {
-                    case PARTITION_KEY:
-                        add(keyComponents[def.position()]);
-                        break;
-                    case STATIC:
-                        addCell(def, staticRow, nowInSec, protocolVersion);
-                        break;
-                    default:
-                        add(null);
-                }
-            }
-        }
-
-        public void addCell(ColumnDefinition def, Row row, int nowInSec, int protocolVersion)
-        {
-            if (def.isComplex())
-            {
-                assert def.type.isMultiCell();
-                ComplexColumnData complexData = row.getComplexColumnData(def);
-                if (complexData == null)
-                    add(null);
-                else if (def.type.isCollection())
-                    add(((CollectionType) def.type).serializeForNativeProtocol(complexData.iterator(), protocolVersion));
-                else
-                    add(((UserType) def.type).serializeForNativeProtocol(complexData.iterator(), protocolVersion));
-            }
-            else
-            {
-                add(row.getCell(def), nowInSec);
-            }
         }
 
         public void add(ByteBuffer v)
@@ -448,15 +400,21 @@ public abstract class Selection
                 selectors.addInputRow(protocolVersion, this);
                 if (!selectors.isAggregate())
                 {
-                    onRowCompleted(getOutputRow());
+                    boolean res = onRowCompleted(getOutputRow());
                     selectors.reset();
+                    current = null;
+                    if (!res)
+                        complete();
                 }
             }
             current = new ArrayList<>(selection.columns.size());
         }
 
-        protected void completeCurrentRow() throws InvalidRequestException
+        public void complete() throws InvalidRequestException
         {
+            if (completed)
+                return;
+
             if (current != null)
             {
                 selectors.addInputRow(protocolVersion, this);
@@ -467,9 +425,35 @@ public abstract class Selection
 
             if (resultIsEmpty() && selectors.isAggregate())
                 onRowCompleted(getOutputRow());
+
+            completed = true;
         }
 
-        public abstract void onRowCompleted(List<ByteBuffer> row);
+        public boolean isCompleted()
+        {
+            return completed;
+        }
+
+        /**
+         * Called when a complete row is available. Must return true in order to
+         * continue processing more rows.
+         *
+         * @param row - the completed row
+         * @return true if we should prcess more rows
+         */
+        public abstract boolean onRowCompleted(List<ByteBuffer> row);
+
+        /**
+         * Called after the iteration has finished, typically after completing,
+         * if the pager is not exhausted.
+         *
+         * @param pagingState - the paging state that can be used to resume a new iteration.
+         */
+        public abstract void setHasMorePages(PagingState pagingState);
+
+        /**
+         * @return - true if there is at least one row.
+         */
         public abstract boolean resultIsEmpty();
 
         private List<ByteBuffer> getOutputRow()
@@ -493,9 +477,15 @@ public abstract class Selection
             this.resultSet = new ResultSet(selection.getResultMetadata(isJson).copy(), new ArrayList<>());
         }
 
-        public void onRowCompleted(List<ByteBuffer> row)
+        public boolean onRowCompleted(List<ByteBuffer> row)
         {
             resultSet.addRow(row);
+            return true;
+        }
+
+        public void setHasMorePages(PagingState pagingState)
+        {
+            this.resultSet.metadata.setHasMorePages(pagingState);
         }
 
         public boolean resultIsEmpty()
@@ -505,7 +495,9 @@ public abstract class Selection
 
         public ResultSet build() throws InvalidRequestException
         {
-            completeCurrentRow();
+            if (!completed)
+                complete();
+
             return resultSet;
         }
     }

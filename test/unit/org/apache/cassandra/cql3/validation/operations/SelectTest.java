@@ -695,11 +695,9 @@ public class SelectTest extends CQLTester
         execute("INSERT INTO %s (kind, time, value1) VALUES ('ev1', ?, ?)", 4, 4);
         execute("INSERT INTO %s (kind, time, value1, value2) VALUES ('ev2', 0, 0, 0)");
 
-        assertRows(execute("SELECT COUNT(*) FROM %s WHERE kind = 'ev1'"),
-                   row(5L));
-
-        assertRows(execute("SELECT COUNT(1) FROM %s WHERE kind IN ('ev1', 'ev2') AND time=0"),
-                   row(2L));
+        assertRows(execute("SELECT COUNT(*) FROM %s WHERE kind = 'ev1'"), row(5L));
+        assertRows(execute("SELECT COUNT(1) FROM %s WHERE kind IN ('ev1', 'ev2') AND time=0"), row(2L));
+        assertRows(execute("SELECT COUNT(*) FROM %s"), row(6L));
     }
 
     /**

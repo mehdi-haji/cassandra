@@ -20,8 +20,11 @@ package org.apache.cassandra.cql3;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ReversedType;
+import org.apache.cassandra.db.partitions.PartitionStatisticsCollector;
+import org.apache.cassandra.db.rows.Row;
 
 import java.util.Collection;
 import java.util.Iterator;
@@ -74,6 +77,23 @@ public class ColumnSpecification
                 return false;
         }
         return true;
+    }
+
+    /**
+     * Return the length of the underlying type when encoded into a Byte buffer, if the underlying type is fixed,
+     * otherwise provide an estimate. To calculate this estimate we use them mean partition size and the mean
+     * number of cells in this partition, cfs.getMeanColumns(), which returns the mane number of cells for
+     * all rows in a partitions, see {@link org.apache.cassandra.db.rows.Rows#collectStats(Row, PartitionStatisticsCollector)}.
+     *
+     * @return - the approximate length of the byte buffer associated with the type of this column
+     */
+    public int estimatedSize(ColumnFamilyStore cfs)
+    {
+        int fixedLength = type.valueLengthIfFixed();
+        if (fixedLength > 0)
+            return fixedLength;
+
+        return (int) ((cfs.getMeanPartitionSize() / cfs.getMeanColumns()) * cfs.metadata.partitionColumns().regulars.size());
     }
 
     @Override

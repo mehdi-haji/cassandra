@@ -47,7 +47,7 @@ public class StressYaml
     public static class TokenRangeQueryDef
     {
         public String columns;
-        public int page_size_bytes = 10240;
+        public int page_size = 5000;
     }
 
 }

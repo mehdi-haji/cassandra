@@ -31,6 +31,7 @@ import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.pager.PagingState;
 import org.apache.cassandra.transport.CBCodec;
 import org.apache.cassandra.transport.CBUtil;
+import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.ProtocolException;
 import org.apache.cassandra.transport.Server;
 import org.apache.cassandra.utils.Pair;
@@ -406,45 +407,119 @@ public abstract class QueryOptions
         private static final UUID NO_ASYNC_PAGING_UUID = new UUID(0, 0);
         private static final AsyncPagingOptions DEFAULT = new AsyncPagingOptions(NO_ASYNC_PAGING_UUID);
 
+        public enum PageUnit
+        {
+            BYTES(1),
+            ROWS(2);
+
+            private final int id;
+            PageUnit(int id)
+            {
+                this.id = id;
+            }
+
+
+            private static final PageUnit[] pageUnits;
+            static
+            {
+                int maxId = Arrays.stream(PageUnit.values()).map(pu -> pu.id).reduce(0, Math::max);
+                pageUnits = new PageUnit[maxId + 1];
+                for (PageUnit pu : PageUnit.values())
+                {
+                    if (pageUnits[pu.id] != null)
+                        throw new IllegalStateException("Duplicate page unit id");
+                    pageUnits[pu.id] = pu;
+                }
+            }
+
+            static PageUnit decode(int id)
+            {
+                if (id >= pageUnits.length || pageUnits[id] == null)
+                    throw new ProtocolException(String.format("Unknown page unit %d", id));
+                return pageUnits[id];
+            }
+        }
+
         public final UUID uuid;
         public final int pageSize;
+        public final PageUnit pageUnit;
         public final int maxPages;
         public final int maxPagesPerSecond;
 
         private AsyncPagingOptions(UUID uuid)
         {
-            this(uuid, 0, 0, 0);
+            this(uuid, 0, PageUnit.BYTES, 0, 0);
         }
 
-        private AsyncPagingOptions(UUID uuid, int pageSize, int maxPages, int maxPagesPerSecond)
+        private AsyncPagingOptions(UUID uuid, int pageSize, PageUnit pageUnit, int maxPages, int maxPagesPerSecond)
         {
             this.uuid = uuid;
             this.pageSize = pageSize;
+            this.pageUnit = pageUnit;
             this.maxPages = maxPages;
             this.maxPagesPerSecond = maxPagesPerSecond;
         }
 
         public static AsyncPagingOptions decode(ByteBuf body, int version)
         {
-            return new AsyncPagingOptions(CBUtil.readUUID(body), body.readInt(), body.readInt(), body.readInt());
+            return new AsyncPagingOptions(CBUtil.readUUID(body),
+                                          body.readInt(),
+                                          PageUnit.decode(body.readInt()),
+                                          body.readInt(),
+                                          body.readInt());
         }
 
         public void encode(ByteBuf dest, int version)
         {
             CBUtil.writeUUID(uuid, dest);
             dest.writeInt(pageSize);
+            dest.writeInt(pageUnit.id);
             dest.writeInt(maxPages);
             dest.writeInt(maxPagesPerSecond);
         }
 
         public int encodedSize(int version)
         {
-            return CBUtil.sizeOfUUID(uuid) + 12;
+            return CBUtil.sizeOfUUID(uuid) + 16;
         }
 
         public boolean asyncPagingRequested()
         {
             return !uuid.equals(NO_ASYNC_PAGING_UUID);
+        }
+
+        /**
+         * Return an estimated size of a buffer that should be able to accommodate the page requested by the user.
+         * If the page unit is bytes then return the page size, if it is in ROWS then return the number of rows
+         * multiplied by the average row size.
+         *
+         * @param rowSize - the average row size in bytes
+         * @return the page buffer size in bytes
+         */
+        public int bufferSize(int rowSize)
+        {
+            if (pageUnit == PageUnit.BYTES)
+                return pageSize;
+            else // ROWS
+                return pageSize * rowSize;
+        }
+
+        /**
+         * Return true if we are ready to send a page. If the page unit is rows simple compare the number
+         * of rows with the page size, if it is in bytes see if there is less than avg row size left in
+         * the page.
+         *
+         * @param numRows - the number of rows written so far
+         * @param size - the size written so far in bytes
+         * @param rowSize - the average row size in bytes
+         * @return - true if the page can be considered completed
+         */
+        public boolean completed(int numRows, int size, int rowSize)
+        {
+            if (pageUnit == PageUnit.ROWS)
+                return numRows >= pageSize;
+            else
+                return (pageSize - size) <= rowSize;
         }
     }
 

@@ -119,7 +119,7 @@ public class LongType extends AbstractType<Long>
     }
 
     @Override
-    protected int valueLengthIfFixed()
+    public int valueLengthIfFixed()
     {
         return 8;
     }

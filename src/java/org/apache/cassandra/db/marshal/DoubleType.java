@@ -99,7 +99,7 @@ public class DoubleType extends AbstractType<Double>
     }
 
     @Override
-    protected int valueLengthIfFixed()
+    public int valueLengthIfFixed()
     {
         return 8;
     }

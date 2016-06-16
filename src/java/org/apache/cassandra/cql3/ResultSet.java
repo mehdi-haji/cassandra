@@ -30,7 +30,7 @@ import org.apache.cassandra.thrift.CqlMetadata;
 import org.apache.cassandra.thrift.CqlResult;
 import org.apache.cassandra.thrift.CqlResultType;
 import org.apache.cassandra.thrift.CqlRow;
-import org.apache.cassandra.transport.async.paging.AsyncPagingParams;
+import org.apache.cassandra.cql3.async.paging.AsyncPagingParams;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.service.pager.PagingState;
 
@@ -234,13 +234,18 @@ public class ResultSet
         {
             for (int i = 0; i < metadata.columnCount; i++)
             {
-                if (checkSpace && dest.writableBytes() < CBUtil.sizeOfValue(row.get(i)))
+                if (checkSpace && dest.writableBytes() < sizeOfValue(row.get(i)))
                     return false;
 
                 CBUtil.writeValue(row.get(i), dest);
             }
 
             return true;
+        }
+
+        public int sizeOfValue(ByteBuffer buff)
+        {
+            return CBUtil.sizeOfValue(buff);
         }
 
         public int encodedSize(ResultSet rs, int version)
@@ -261,7 +266,7 @@ public class ResultSet
         {
             int size = 0;
             for (int i = 0; i < metadata.columnCount; i++)
-                size += CBUtil.sizeOfValue(row.get(i));
+                size += sizeOfValue(row.get(i));
             return size;
         }
     }
@@ -283,7 +288,7 @@ public class ResultSet
         public final List<ColumnSpecification> names;
         private final int columnCount;
         private PagingState pagingState;
-        private Optional<AsyncPagingParams> streamingState;
+        private Optional<AsyncPagingParams> asyncPagingParams;
 
         public ResultMetadata(List<ColumnSpecification> names)
         {
@@ -301,18 +306,18 @@ public class ResultSet
                                List<ColumnSpecification> names,
                                int columnCount,
                                PagingState pagingState,
-                               Optional<AsyncPagingParams> streamingState)
+                               Optional<AsyncPagingParams> asyncPagingParams)
         {
             this.flags = flags;
             this.names = names;
             this.columnCount = columnCount;
             this.pagingState = pagingState;
-            this.streamingState = streamingState;
+            this.asyncPagingParams = asyncPagingParams;
         }
 
         public ResultMetadata copy()
         {
-            return new ResultMetadata(EnumSet.copyOf(flags), names, columnCount, pagingState, streamingState);
+            return new ResultMetadata(EnumSet.copyOf(flags), names, columnCount, pagingState, asyncPagingParams);
         }
 
         /**
@@ -347,7 +352,6 @@ public class ResultSet
             return pagingState;
         }
 
-
         public void setHasMorePages(PagingState pagingState)
         {
             this.pagingState = pagingState;
@@ -362,10 +366,15 @@ public class ResultSet
             return flags.contains(Flag.HAS_MORE_PAGES);
         }
 
-        public void setStreamingState(AsyncPagingParams asyncPagingParams)
+        public void setAsyncPagingParams(AsyncPagingParams asyncPagingParams)
         {
-            this.streamingState = Optional.of(asyncPagingParams);
+            this.asyncPagingParams = Optional.of(asyncPagingParams);
             flags.add(Flag.WITH_STREAMING);
+        }
+
+        public Optional<AsyncPagingParams> asyncPagingParams()
+        {
+            return asyncPagingParams;
         }
 
         public void setSkipMetadata()
@@ -392,10 +401,10 @@ public class ResultSet
                 }
             }
 
-            if (streamingState.isPresent())
+            if (asyncPagingParams.isPresent())
             {
-                sb.append(" [streaming: ");
-                sb.append(streamingState.get().toString());
+                sb.append(" [async paging: ");
+                sb.append(asyncPagingParams.get().toString());
                 sb.append(']');
             }
 
@@ -487,7 +496,7 @@ public class ResultSet
                     }
                 }
 
-                m.streamingState.ifPresent(streamingState -> AsyncPagingParams.codec.encode(streamingState, dest, version));
+                m.asyncPagingParams.ifPresent(streamingState -> AsyncPagingParams.codec.encode(streamingState, dest, version));
             }
 
             public int encodedSize(ResultMetadata m, int version)
@@ -521,8 +530,8 @@ public class ResultSet
                     }
                 }
 
-                if (m.streamingState.isPresent())
-                    size += AsyncPagingParams.codec.encodedSize(m.streamingState.get(), version);
+                if (m.asyncPagingParams.isPresent())
+                    size += AsyncPagingParams.codec.encodedSize(m.asyncPagingParams.get(), version);
 
                 return size;
             }

@@ -383,7 +383,7 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>, Assignm
     /**
      * The length of values for this type if all values are of fixed length, -1 otherwise.
      */
-    protected int valueLengthIfFixed()
+    public int valueLengthIfFixed()
     {
         return -1;
     }

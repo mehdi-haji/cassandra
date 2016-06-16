@@ -127,7 +127,7 @@ public class TimestampType extends AbstractType<Date>
     }
 
     @Override
-    protected int valueLengthIfFixed()
+    public int valueLengthIfFixed()
     {
         return 8;
     }

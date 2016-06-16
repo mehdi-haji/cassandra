@@ -19,6 +19,7 @@ package org.apache.cassandra.db.filter;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Optional;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.rows.*;
@@ -164,6 +165,8 @@ public abstract class DataLimits
     {
         // false means we do not propagate our stop signals onto the iterator, we only count
         private boolean enforceLimits = true;
+        private Optional<BasePartitions> currentPartitions = Optional.empty();
+        private Optional<BaseRows> currentRows = Optional.empty();
 
         public Counter enforceLimits(boolean enforceLimits)
         {
@@ -222,20 +225,33 @@ public abstract class DataLimits
         @Override
         protected void attachTo(BasePartitions partitions)
         {
-            if (enforceLimits)
-                super.attachTo(partitions);
-            if (isDone())
+            currentPartitions = Optional.of(partitions);
+            super.attachTo(partitions);
+
+            if (isDone() && enforceLimits)
                 stop();
         }
 
         @Override
         protected void attachTo(BaseRows rows)
         {
-            if (enforceLimits)
-                super.attachTo(rows);
+            currentRows = Optional.of(rows);
+            super.attachTo(rows);
             applyToPartition(rows.partitionKey(), rows.staticRow());
-            if (isDoneForPartition())
+
+            if (enforceLimits && isDoneForPartition())
                 stopInPartition();
+        }
+
+        public boolean earlyTerminationRequested()
+        {
+            if (currentRows.isPresent())
+                return currentRows.get().earlyTerminationRequested();
+
+            if (currentPartitions.isPresent())
+                return currentPartitions.get().earlyTerminationRequested();
+
+            return false;
         }
     }
 

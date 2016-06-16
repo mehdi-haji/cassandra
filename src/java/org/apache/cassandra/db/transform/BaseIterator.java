@@ -101,6 +101,11 @@ abstract class BaseIterator<V, I extends CloseableIterator<? extends V>, O exten
         return moreContents.length > 0 && tryGetMoreContents();
     }
 
+    public boolean earlyTerminationRequested()
+    {
+        return stop.isSignalled;
+    }
+
     @DontInline
     private boolean tryGetMoreContents()
     {

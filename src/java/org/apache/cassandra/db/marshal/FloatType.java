@@ -98,7 +98,7 @@ public class FloatType extends AbstractType<Float>
     }
 
     @Override
-    protected int valueLengthIfFixed()
+    public int valueLengthIfFixed()
     {
         return 4;
     }

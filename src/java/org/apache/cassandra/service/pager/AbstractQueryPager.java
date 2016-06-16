@@ -70,7 +70,7 @@ abstract class AbstractQueryPager implements QueryPager
             return EmptyIterators.partition();
 
         pageSize = Math.min(pageSize, remaining);
-        internalPager = Optional.of(new Pager(limits.forPaging(pageSize), command.nowInSec(), true));
+        internalPager = Optional.of(new Pager(limits.forPaging(pageSize), command.nowInSec()));
         return Transformation.apply(nextPageReadCommand(pageSize).execute(consistency, clientState), internalPager.get());
     }
 
@@ -81,21 +81,19 @@ abstract class AbstractQueryPager implements QueryPager
             return EmptyIterators.partition();
 
         pageSize = Math.min(pageSize, remaining);
-        internalPager = Optional.of(new Pager(limits.forPaging(pageSize), command.nowInSec(), true));
+        internalPager = Optional.of(new Pager(limits.forPaging(pageSize), command.nowInSec()));
         return Transformation.apply(nextPageReadCommand(pageSize).executeInternal(executionController), internalPager.get());
     }
 
     @Override
-    public PartitionIterator fetchMultiplePagesInternal(int pageSize, ReadExecutionController executionController)
+    public PartitionIterator fetchUpToLimitsInternal(ReadExecutionController executionController)
     throws RequestValidationException, RequestExecutionException
     {
         if (isExhausted())
             return EmptyIterators.partition();
 
-        pageSize = Math.min(pageSize, remaining);
-        internalPager = Optional.of(new Pager(limits.forPaging(pageSize), command.nowInSec(), false));
-
-        return Transformation.apply(nextPageReadCommand(DataLimits.NO_LIMIT).executeInternal(executionController), internalPager.get());
+        internalPager = Optional.of(new Pager(limits.forPaging(remaining), command.nowInSec()));
+        return Transformation.apply(nextPageReadCommand(remaining).executeInternal(executionController), internalPager.get());
     }
 
     /**
@@ -104,15 +102,13 @@ abstract class AbstractQueryPager implements QueryPager
      */
     private class Pager extends Transformation<RowIterator>
     {
-        private final DataLimits pageLimits;
         private final DataLimits.Counter counter;
         private Row lastRow;
         private boolean isFirstPartition = true;
 
-        private Pager(DataLimits pageLimits, int nowInSec, boolean stopAfterOnePage)
+        private Pager(DataLimits pageLimits, int nowInSec)
         {
-            this.counter = pageLimits.newCounter(nowInSec, true).enforceLimits(stopAfterOnePage);
-            this.pageLimits = pageLimits;
+            this.counter = pageLimits.newCounter(nowInSec, true);
         }
 
         @Override
@@ -145,6 +141,9 @@ abstract class AbstractQueryPager implements QueryPager
         public void onClose()
         {
             saveState();
+
+            // if no early termination was requested then the iteration must have finished
+            exhausted = !counter.earlyTerminationRequested();
         }
 
         private void saveState()
@@ -166,7 +165,13 @@ abstract class AbstractQueryPager implements QueryPager
             {
                 remainingInPartition -= counter.countedInCurrentPartition();
             }
-            exhausted = counted < pageLimits.count();
+
+            counter.reset();
+        }
+
+        private void stop()
+        {
+            counter.stop();
         }
 
         public Row applyToStatic(Row row)
@@ -182,11 +187,6 @@ abstract class AbstractQueryPager implements QueryPager
             lastRow = row;
             return row;
         }
-
-        private void reset()
-        {
-            counter.reset();
-        }
     }
 
     protected void restoreState(DecoratedKey lastKey, int remaining, int remainingInPartition)
@@ -198,19 +198,19 @@ abstract class AbstractQueryPager implements QueryPager
 
     public boolean isExhausted()
     {
-        return exhausted || remaining == 0 || ((this instanceof SinglePartitionPager) && remainingInPartition == 0);
+        return exhausted ||remaining == 0 || ((this instanceof SinglePartitionPager) && remainingInPartition == 0);
+    }
+
+    @Override
+    public void stop()
+    {
+        internalPager.ifPresent(Pager::stop);
     }
 
     @Override
     public void saveState()
     {
         internalPager.ifPresent(Pager::saveState);
-    }
-
-    @Override
-    public void reset()
-    {
-        internalPager.ifPresent(Pager::reset);
     }
 
     public int maxRemaining()

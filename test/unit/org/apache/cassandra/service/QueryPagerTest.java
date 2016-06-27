@@ -140,6 +140,33 @@ public class QueryPagerTest
         return partitionList;
     }
 
+    private static List<Row> fetchPage(QueryPager pager, int pageSize)
+    {
+        List<Row> rows = new ArrayList<>(pageSize);
+        try (ReadExecutionController executionController = pager.executionController();
+             PartitionIterator iterator = pager.fetchPageInternal(pageSize, executionController))
+        {
+            while (iterator.hasNext())
+            {
+                try (RowIterator partition = iterator.next())
+                {
+                    Row staticRow = partition.staticRow();
+                    if (!partition.hasNext() && !staticRow.isEmpty())
+                        rows.add(staticRow);
+
+                    while (partition.hasNext())
+                        rows.add(partition.next());
+                }
+            }
+        }
+        catch (Throwable t)
+        {
+            t.printStackTrace();
+            throw t;
+        }
+        return rows;
+    }
+
     private static ReadCommand namesQuery(String key, String... names)
     {
         AbstractReadCommandBuilder builder = Util.cmd(cfs(), key);
@@ -148,12 +175,12 @@ public class QueryPagerTest
         return builder.withPagingLimit(100).build();
     }
 
-    private static SinglePartitionReadCommand sliceQuery(String key, String start, String end, int count)
+    private static SinglePartitionReadCommand sliceQuery(String key, String start, String end)
     {
-        return sliceQuery(key, start, end, false, count);
+        return sliceQuery(key, start, end, false);
     }
 
-    private static SinglePartitionReadCommand sliceQuery(String key, String start, String end, boolean reversed, int count)
+    private static SinglePartitionReadCommand sliceQuery(String key, String start, String end, boolean reversed)
     {
         ClusteringComparator cmp = cfs().getComparator();
         CFMetaData metadata = cfs().metadata;
@@ -239,7 +266,7 @@ public class QueryPagerTest
 
     public void sliceQueryTest(boolean testPagingState, int protocolVersion) throws Exception
     {
-        ReadCommand command = sliceQuery("k0", "c1", "c8", 10);
+        ReadCommand command = sliceQuery("k0", "c1", "c8");
         QueryPager pager = command.getPager(null, protocolVersion);
 
         assertFalse(pager.isExhausted());
@@ -272,7 +299,7 @@ public class QueryPagerTest
 
     public void reversedSliceQueryTest(boolean testPagingState, int protocolVersion) throws Exception
     {
-        ReadCommand command = sliceQuery("k0", "c1", "c8", true, 10);
+        ReadCommand command = sliceQuery("k0", "c1", "c8", true);
         QueryPager pager = command.getPager(null, protocolVersion);
 
         assertFalse(pager.isExhausted());
@@ -307,8 +334,8 @@ public class QueryPagerTest
     {
         ReadQuery command = new SinglePartitionReadCommand.Group(new ArrayList<SinglePartitionReadCommand>()
         {{
-            add(sliceQuery("k1", "c2", "c6", 10));
-            add(sliceQuery("k4", "c3", "c5", 10));
+            add(sliceQuery("k1", "c2", "c6"));
+            add(sliceQuery("k4", "c3", "c5"));
         }}, DataLimits.NONE);
         QueryPager pager = command.getPager(null, protocolVersion);
 
@@ -330,6 +357,66 @@ public class QueryPagerTest
         assertRow(partition.get(0), "k4", "c5");
 
         assertTrue(pager.isExhausted());
+    }
+
+    /**
+     * Test a query with 1 CQL row per partition with various page sizes.
+     */
+    @Test
+    public void multiPartitionSingleRowQueryTest() throws Exception
+    {
+        int totQueryRows = 4;
+        ReadQuery command = new SinglePartitionReadCommand.Group(new ArrayList<SinglePartitionReadCommand>()
+        {{
+            add(sliceQuery("k1", "c1", "c1"));
+            add(sliceQuery("k2", "c1", "c1"));
+            add(sliceQuery("k3", "c1", "c1"));
+            add(sliceQuery("k4", "c1", "c1"));
+        }}, DataLimits.NONE);
+
+        checkRows(command, totQueryRows);
+    }
+
+    /**
+     * Test a query with 4 CQL rows per partition with various page sizes.
+     */
+    @Test
+    public void multiPartitionFourRowsQueryTest() throws Exception
+    {
+        int totQueryRows = 16;
+        ReadQuery command = new SinglePartitionReadCommand.Group(new ArrayList<SinglePartitionReadCommand>()
+        {{
+            add(sliceQuery("k1", "c1", "c4"));
+            add(sliceQuery("k2", "c1", "c4"));
+            add(sliceQuery("k3", "c1", "c4"));
+            add(sliceQuery("k4", "c1", "c4"));
+        }}, DataLimits.NONE);
+
+        checkRows(command, totQueryRows);
+    }
+
+    private void checkRows(ReadQuery command, int totQueryRows)
+    {
+        for (int pageSize : new int[] { 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 20 } )
+        //for (int pageSize : new int[] { 2 } )
+        {
+            int currentRows = 0;
+            QueryPager pager = command.getPager(null, Server.CURRENT_VERSION);
+            assertFalse(pager.isExhausted());
+
+            while (!pager.isExhausted())
+            {
+                List<Row> rows = fetchPage(pager, pageSize);
+                int expectedSize = Math.min(pageSize, totQueryRows - currentRows);
+                assertEquals(String.format("Failed after %d rows with ps %d", currentRows, pageSize),
+                             expectedSize, rows.size());
+                currentRows += rows.size();
+                if (!pager.isExhausted())
+                    pager = maybeRecreate(pager, command, true, Server.CURRENT_VERSION);
+            }
+
+            assertEquals(totQueryRows, currentRows);
+        }
     }
 
     @Test

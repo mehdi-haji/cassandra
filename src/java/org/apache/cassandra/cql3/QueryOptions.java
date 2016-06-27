@@ -490,7 +490,7 @@ public abstract class QueryOptions
 
         /**
          * Return an estimated size of a buffer that should be able to accommodate the page requested by the user.
-         * If the page unit is bytes then return the page size, if it is in ROWS then return the number of rows
+         * If the page unit is bytes, then return the page size, if it is in ROWS then return the number of rows
          * multiplied by the average row size.
          *
          * @param rowSize - the average row size in bytes
@@ -505,7 +505,7 @@ public abstract class QueryOptions
         }
 
         /**
-         * Return true if we are ready to send a page. If the page unit is rows simple compare the number
+         * Return true if we are ready to send a page. If the page unit is rows, simply compare the number
          * of rows with the page size, if it is in bytes see if there is less than avg row size left in
          * the page.
          *
@@ -520,6 +520,22 @@ public abstract class QueryOptions
                 return numRows >= pageSize;
             else
                 return (pageSize - size) <= rowSize;
+        }
+
+        /**
+         * Return an estimate of the number of rows in a page. If the page unit is rows, simply return the page
+         * size. If it is in bytes, divide by page size by the average row size.
+         *
+         * @param rowSize - the average row size in bytes
+         * @return - an estimated number of rows in the page.
+         */
+        public int estimatedRows(int rowSize)
+        {
+            if (pageUnit == PageUnit.ROWS)
+                return pageSize;
+            else
+                return (int)Math.ceil(pageSize / rowSize);
+
         }
     }
 

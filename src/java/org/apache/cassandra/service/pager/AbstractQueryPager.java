@@ -46,7 +46,7 @@ abstract class AbstractQueryPager implements QueryPager
     private DecoratedKey lastKey;
     private int remainingInPartition;
 
-    private boolean exhausted;
+    protected boolean exhausted;
 
     protected AbstractQueryPager(ReadCommand command, int protocolVersion)
     {
@@ -102,6 +102,7 @@ abstract class AbstractQueryPager implements QueryPager
      */
     private class Pager extends Transformation<RowIterator>
     {
+        private final DataLimits pageLimits;
         private final DataLimits.Counter counter;
         private Row lastRow;
         private boolean isFirstPartition = true;
@@ -109,6 +110,7 @@ abstract class AbstractQueryPager implements QueryPager
         private Pager(DataLimits pageLimits, int nowInSec)
         {
             this.counter = pageLimits.newCounter(nowInSec, true);
+            this.pageLimits = pageLimits;
         }
 
         @Override
@@ -167,6 +169,7 @@ abstract class AbstractQueryPager implements QueryPager
             }
 
             counter.reset();
+            //exhausted = counted < pageLimits.count();
         }
 
         private void stop()
@@ -196,9 +199,14 @@ abstract class AbstractQueryPager implements QueryPager
         this.remainingInPartition = remainingInPartition;
     }
 
+    public int counted()
+    {
+        return internalPager.isPresent() ? internalPager.get().counter.counted() : 0;
+    }
+
     public boolean isExhausted()
     {
-        return exhausted ||remaining == 0 || ((this instanceof SinglePartitionPager) && remainingInPartition == 0);
+        return exhausted || remaining == 0 || ((this instanceof SinglePartitionPager) && remainingInPartition == 0);
     }
 
     @Override

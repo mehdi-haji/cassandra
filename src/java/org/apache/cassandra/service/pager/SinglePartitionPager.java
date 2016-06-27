@@ -51,6 +51,13 @@ public class SinglePartitionPager extends AbstractQueryPager
         }
     }
 
+    public static SinglePartitionPager empty(SinglePartitionReadCommand command, PagingState state, int protocolVersion)
+    {
+        SinglePartitionPager ret = new SinglePartitionPager(command, state, protocolVersion);
+        ret.exhausted = true;
+        return ret;
+    }
+
     public ByteBuffer key()
     {
         return command.partitionKey().getKey();
@@ -59,6 +66,11 @@ public class SinglePartitionPager extends AbstractQueryPager
     public DataLimits limits()
     {
         return command.limits();
+    }
+
+    SinglePartitionReadCommand command()
+    {
+        return command;
     }
 
     public PagingState state()

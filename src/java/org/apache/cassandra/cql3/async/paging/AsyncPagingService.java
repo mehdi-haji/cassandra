@@ -88,13 +88,10 @@ public class AsyncPagingService
 
             public int pageSize()
             {
-                // The page builder will determine when a page is complete depending on the page unit (bytes or rows).
-                // From the pager we just want it to keep on iterating and counting rows, and more importantly we need
-                // it for determining the paging state and the correct read command, which depends on the paging state
-                // saved in a previous iteration or retrieved from the client, and the read command type.
-                // The pager also monitors the base iterators via the counter stopping transformation, and stops the
-                // iteration when the builder asks it to do so.
-                return Integer.MAX_VALUE;
+                // This is only used by non-optimized queries (SelectStatement.DistributedExecutor)
+                // and doesn't necessarily correspond to the size of the pages sent to the client, which
+                // may be different
+                return asyncPagingOptions.estimatedRows(statement.selection.estimatedRowSize());
             }
         };
     }

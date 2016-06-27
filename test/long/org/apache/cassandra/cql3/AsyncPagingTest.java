@@ -437,7 +437,7 @@ public class AsyncPagingTest extends CQLTester
         private void createTable() throws Throwable
         {
             CQLTester.initClientCluster(protocolVersion, new CustomNettyOptions(numClientThreads));
-            tester.createTable("CREATE TABLE %s (k int, c int, val1 TEXT, val2 TEXT, PRIMARY KEY(k, c))");
+            tester.createTable("CREATE TABLE %s (k int, c int, val1 TEXT, val2 TEXT, PRIMARY KEY(k, c)) WITH compression = {'sstable_compression' : ''}");
 
             rows = new Object[numPartitions * numClusterings][];
 

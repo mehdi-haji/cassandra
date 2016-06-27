@@ -168,9 +168,9 @@ public abstract class DataLimits
         private Optional<BasePartitions> currentPartitions = Optional.empty();
         private Optional<BaseRows> currentRows = Optional.empty();
 
-        public Counter enforceLimits(boolean enforceLimits)
+        public Counter onlyCount()
         {
-            this.enforceLimits = enforceLimits;
+            this.enforceLimits = false;
             return this;
         }
 
@@ -226,9 +226,9 @@ public abstract class DataLimits
         protected void attachTo(BasePartitions partitions)
         {
             currentPartitions = Optional.of(partitions);
-            super.attachTo(partitions);
-
-            if (isDone() && enforceLimits)
+            if (enforceLimits)
+                super.attachTo(partitions);
+            if (isDone())
                 stop();
         }
 
@@ -236,10 +236,10 @@ public abstract class DataLimits
         protected void attachTo(BaseRows rows)
         {
             currentRows = Optional.of(rows);
-            super.attachTo(rows);
+            if (enforceLimits)
+                super.attachTo(rows);
             applyToPartition(rows.partitionKey(), rows.staticRow());
-
-            if (enforceLimits && isDoneForPartition())
+            if (isDoneForPartition())
                 stopInPartition();
         }
 

@@ -140,9 +140,9 @@ public class QueryPagerTest
         return partitionList;
     }
 
-    private static List<Row> fetchPage(QueryPager pager, int pageSize)
+    private static Map<DecoratedKey, List<Row>> fetchPage(QueryPager pager, int pageSize)
     {
-        List<Row> rows = new ArrayList<>(pageSize);
+        Map<DecoratedKey, List<Row>> ret = new HashMap<>();
         try (ReadExecutionController executionController = pager.executionController();
              PartitionIterator iterator = pager.fetchPageInternal(pageSize, executionController))
         {
@@ -150,12 +150,15 @@ public class QueryPagerTest
             {
                 try (RowIterator partition = iterator.next())
                 {
+                    List<Row> rows = new ArrayList<>();
                     Row staticRow = partition.staticRow();
                     if (!partition.hasNext() && !staticRow.isEmpty())
                         rows.add(staticRow);
 
                     while (partition.hasNext())
                         rows.add(partition.next());
+
+                    ret.put(partition.partitionKey(), rows);
                 }
             }
         }
@@ -164,7 +167,7 @@ public class QueryPagerTest
             t.printStackTrace();
             throw t;
         }
-        return rows;
+        return ret;
     }
 
     private static ReadCommand namesQuery(String key, String... names)
@@ -400,23 +403,48 @@ public class QueryPagerTest
         for (int pageSize : new int[] { 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 20 } )
         //for (int pageSize : new int[] { 2 } )
         {
+            Map<DecoratedKey, List<Row>> allRows = new HashMap<>();
             int currentRows = 0;
             QueryPager pager = command.getPager(null, Server.CURRENT_VERSION);
             assertFalse(pager.isExhausted());
 
             while (!pager.isExhausted())
             {
-                List<Row> rows = fetchPage(pager, pageSize);
+                Map<DecoratedKey, List<Row>> rows = fetchPage(pager, pageSize);
+                int numRows = rows.values().stream().map(List::size).reduce(0, Integer::sum);
+
+                for (Map.Entry<DecoratedKey, List<Row>> entry : rows.entrySet())
+                    allRows.merge(entry.getKey(), entry.getValue(), ((rows1, rows2) -> {rows1.addAll(rows2); return rows1;}));
+
                 int expectedSize = Math.min(pageSize, totQueryRows - currentRows);
-                assertEquals(String.format("Failed after %d rows with ps %d", currentRows, pageSize),
-                             expectedSize, rows.size());
-                currentRows += rows.size();
+                assertEquals(String.format("Failed after %d rows with ps %d:\n%s", currentRows, pageSize, formatRows(allRows)),
+                             expectedSize, numRows);
+                currentRows += numRows;
+
                 if (!pager.isExhausted())
                     pager = maybeRecreate(pager, command, true, Server.CURRENT_VERSION);
             }
 
             assertEquals(totQueryRows, currentRows);
         }
+    }
+
+    private String formatRows(Map<DecoratedKey, List<Row>> rows)
+    {
+        CFMetaData metadata = cfs().metadata;
+
+        StringBuilder str = new StringBuilder();
+        for (Map.Entry<DecoratedKey, List<Row>> entry : rows.entrySet())
+        {
+            for (Row row : entry.getValue())
+            {
+                str.append(entry.getKey().toString());
+                str.append(' ');
+                str.append(row.toString(metadata));
+                str.append('\n');
+            }
+        }
+        return str.toString();
     }
 
     @Test

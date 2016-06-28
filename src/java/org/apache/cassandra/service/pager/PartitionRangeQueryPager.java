@@ -24,11 +24,13 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.DataLimits;
+import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.schema.IndexMetadata;
+import org.apache.cassandra.service.ClientState;
 
 /**
  * Pages a PartitionRangeReadCommand.
@@ -40,12 +42,14 @@ public class PartitionRangeQueryPager extends AbstractQueryPager
 {
     private static final Logger logger = LoggerFactory.getLogger(PartitionRangeQueryPager.class);
 
+    private final PartitionRangeReadCommand command;
     private volatile DecoratedKey lastReturnedKey;
     private volatile PagingState.RowMark lastReturnedRow;
 
     public PartitionRangeQueryPager(PartitionRangeReadCommand command, PagingState state, int protocolVersion)
     {
         super(command, protocolVersion);
+        this.command = command;
 
         if (state != null)
         {
@@ -62,7 +66,19 @@ public class PartitionRangeQueryPager extends AbstractQueryPager
              : new PagingState(lastReturnedKey.getKey(), lastReturnedRow, maxRemaining(), remainingInPartition());
     }
 
-    protected ReadCommand nextPageReadCommand(int pageSize)
+    protected PartitionIterator executeCommand(int pageSize, ConsistencyLevel consistency, ClientState clientState)
+    throws RequestExecutionException
+    {
+        return nextPageReadCommand(pageSize).execute(consistency, clientState);
+    }
+
+    protected PartitionIterator executeCommandInternal(int pageSize, ReadExecutionController executionController)
+    throws RequestExecutionException
+    {
+        return nextPageReadCommand(pageSize).executeInternal(executionController);
+    }
+
+    private ReadCommand nextPageReadCommand(int pageSize)
     throws RequestExecutionException
     {
         DataLimits limits;

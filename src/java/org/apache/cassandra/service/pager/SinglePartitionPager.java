@@ -23,8 +23,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.exceptions.RequestExecutionException;
+import org.apache.cassandra.service.ClientState;
 
 /**
  * Common interface to single partition queries (by slice and by name).
@@ -80,7 +83,19 @@ public class SinglePartitionPager extends AbstractQueryPager
              : new PagingState(null, lastReturned, maxRemaining(), remainingInPartition());
     }
 
-    protected ReadCommand nextPageReadCommand(int pageSize)
+    protected PartitionIterator executeCommand(int pageSize, ConsistencyLevel consistency, ClientState clientState)
+    throws RequestExecutionException
+    {
+        return nextPageReadCommand(pageSize).execute(consistency, clientState);
+    }
+
+    protected PartitionIterator executeCommandInternal(int pageSize, ReadExecutionController executionController)
+    throws RequestExecutionException
+    {
+        return nextPageReadCommand(pageSize).executeInternal(executionController);
+    }
+
+    private ReadCommand nextPageReadCommand(int pageSize)
     {
         Clustering clustering = lastReturned == null ? null : lastReturned.clustering(command.metadata());
         DataLimits limits = (lastReturned == null || command.isForThrift()) ? limits().forPaging(pageSize)

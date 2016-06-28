@@ -36,6 +36,14 @@ import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.service.ClientState;
 
 /**
+ *
+ * TODO: THIS CLASS IS NO LONGER USED AND CAN BE DELETED once the code reviewer has accepted PartitionGroupQueryPager
+ * as a valid alternative. I leave it here as I plan to squash the commits before submitting for review, and I do
+ * not want to loose the modifications I made to it in order to make it work with the modifications done
+ * to AbstractQueryPager.
+ *
+ * --
+ *
  * Pager over a list of ReadCommand.
  *
  * Note that this is not easy to make efficient. Indeed, we need to page the first command fully before

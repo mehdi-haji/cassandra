@@ -225,15 +225,15 @@ public class SelectStatement implements CQLStatement
         cl.validateForRead(keyspace());
 
         if (options.getAsyncPagingOptions().asyncPagingRequested())
-            return innerExecuteAsync(state, options);
+            return innerExecuteAsync(state, options, FBUtilities.nowInSeconds());
         else
-            return innerExecute(state, options, false);
+            return innerExecute(state, options, FBUtilities.nowInSeconds(), false);
     }
 
     public ResultMessage.Rows execute(QueryState state, QueryOptions options)
         throws RequestExecutionException, RequestValidationException
     {
-       return innerExecute(state, options, false);
+       return innerExecute(state, options,  FBUtilities.nowInSeconds(), false);
     }
 
     private int getPageSize(QueryOptions options)
@@ -276,13 +276,13 @@ public class SelectStatement implements CQLStatement
         private final int userPerPartitionLimit;
         private final ReadQuery query;
 
-        ExecutorBuilder(SelectStatement statement, QueryOptions options, QueryState state)
+        ExecutorBuilder(SelectStatement statement, QueryOptions options, QueryState state, int nowInSec)
         {
             this.statement = statement;
             this.options = options;
             this.state = state;
 
-            this.nowInSec = FBUtilities.nowInSeconds();
+            this.nowInSec = nowInSec;
             this.userLimit = statement.getLimit(options);
             this.userPerPartitionLimit = statement.getPerPartitionLimit(options);
             this.query = statement.getQuery(options, nowInSec, userLimit, userPerPartitionLimit);
@@ -618,7 +618,13 @@ public class SelectStatement implements CQLStatement
     public ResultMessage.Rows executeInternal(QueryState state, QueryOptions options)
     throws RequestExecutionException, RequestValidationException
     {
-        return innerExecute(state, options, true);
+        return executeInternal(state, options, FBUtilities.nowInSeconds());
+    }
+
+    public ResultMessage.Rows executeInternal(QueryState state, QueryOptions options, int nowInSec)
+    throws RequestExecutionException, RequestValidationException
+    {
+        return innerExecute(state, options, nowInSec, true);
     }
 
     /**
@@ -630,10 +636,10 @@ public class SelectStatement implements CQLStatement
      * @throws RequestExecutionException
      * @throws RequestValidationException
      */
-    private ResultMessage.Rows innerExecute(QueryState state, QueryOptions options, boolean isInternal)
+    private ResultMessage.Rows innerExecute(QueryState state, QueryOptions options, int nowInSec, boolean isInternal)
     throws RequestExecutionException, RequestValidationException
     {
-        Executor executor = new ExecutorBuilder(this, options, state).build(isInternal);
+        Executor executor = new ExecutorBuilder(this, options, state, nowInSec).build(isInternal);
 
         int pageSize = getPageSize(options);
         if (pageSize <= 0 || executor.query.limits().count() <= pageSize)
@@ -656,14 +662,14 @@ public class SelectStatement implements CQLStatement
      * @throws RequestExecutionException
      * @throws RequestValidationException
      */
-    private ResultMessage innerExecuteAsync(QueryState state, QueryOptions options)
+    private ResultMessage innerExecuteAsync(QueryState state, QueryOptions options, int nowInSec)
     throws RequestValidationException, RequestExecutionException
     {
         checkFalse(needsPostQueryOrdering(),
                    "Cannot page queries with both ORDER BY and a IN restriction on the partition key;"
                    + " you must either remove the ORDER BY or the IN and sort client side, or avoid async paging for this query");
 
-        Executor executor = new ExecutorBuilder(this, options, state).build(false);
+        Executor executor = new ExecutorBuilder(this, options, state, nowInSec).build(false);
         StageManager.getStage(Stage.READ).execute(() -> executor.retrieveMultiplePages(AsyncPagingService.pagingFactory(this, state, options)));
         return new ResultMessage.Void();
     }

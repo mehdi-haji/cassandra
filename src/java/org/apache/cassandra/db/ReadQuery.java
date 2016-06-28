@@ -23,6 +23,7 @@ import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.pager.QueryPager;
 import org.apache.cassandra.service.pager.PagingState;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * Generic abstraction for read queries.
@@ -76,6 +77,11 @@ public interface ReadQuery
         public boolean selectsClustering(DecoratedKey key, Clustering clustering)
         {
             return false;
+        }
+
+        public int nowInSec()
+        {
+            return FBUtilities.nowInSeconds();
         }
     };
 
@@ -138,4 +144,15 @@ public interface ReadQuery
      * checkRowFilter is true
      */
     public boolean selectsClustering(DecoratedKey key, Clustering clustering);
+
+    /**
+     * The time in seconds to use as "now" for this query.
+     * <p>
+     * We use the same time as "now" for the whole query to avoid considering different
+     * values as expired during the query, which would be buggy (would throw of counting amongst other
+     * things).
+     *
+     * @return the time (in seconds) to use as "now".
+     */
+    public int nowInSec();
 }

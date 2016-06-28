@@ -1011,7 +1011,8 @@ public class SinglePartitionReadCommand extends ReadCommand
             if (commands.size() == 1)
                 return SinglePartitionReadCommand.getPager(commands.get(0), pagingState, protocolVersion);
 
-            return new MultiPartitionPager(this, pagingState, protocolVersion);
+            //return new MultiPartitionPager(this, pagingState, protocolVersion);
+            return new PartitionGroupQueryPager(this, pagingState, protocolVersion);
         }
 
         public boolean selectsKey(DecoratedKey key)

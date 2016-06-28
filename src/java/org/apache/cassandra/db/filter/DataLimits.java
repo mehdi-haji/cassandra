@@ -245,13 +245,8 @@ public abstract class DataLimits
 
         public boolean earlyTerminationRequested()
         {
-            if (currentRows.isPresent())
-                return currentRows.get().earlyTerminationRequested();
-
-            if (currentPartitions.isPresent())
-                return currentPartitions.get().earlyTerminationRequested();
-
-            return false;
+            return (currentRows.isPresent() && currentRows.get().earlyTerminationRequested()) ||
+                   (currentPartitions.isPresent() && currentPartitions.get().earlyTerminationRequested());
         }
     }
 

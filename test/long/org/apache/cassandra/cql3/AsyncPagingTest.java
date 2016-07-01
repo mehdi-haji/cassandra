@@ -25,6 +25,9 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import com.google.common.util.concurrent.ListenableFuture;
 import org.junit.BeforeClass;
@@ -45,6 +48,8 @@ import com.datastax.driver.core.SimpleStatement;
 import com.datastax.driver.core.Statement;
 import com.datastax.shaded.netty.channel.EventLoopGroup;
 import com.datastax.shaded.netty.channel.nio.NioEventLoopGroup;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.statements.SelectStatement;
 import org.apache.cassandra.transport.Server;
 
 import static org.junit.Assert.assertEquals;
@@ -55,11 +60,16 @@ import static org.junit.Assert.assertTrue;
 public class AsyncPagingTest extends CQLTester
 {
     private static final Logger logger = LoggerFactory.getLogger(AsyncPagingTest.class);
+    private static final Random randomGenerator = new Random();
 
     @BeforeClass
     public static void startup()
     {
         requireNetwork(false);
+
+        long seed = System.nanoTime();
+        logger.info("Using seed {}", seed);
+        randomGenerator.setSeed(seed);
     }
 
     @Test
@@ -68,19 +78,20 @@ public class AsyncPagingTest extends CQLTester
         try(TestHelper helper = new TestBuilder(this).numPartitions(1000)
                                                      .numClusterings(1)
                                                      .partitionSize(1024)
+                                                     .schemaSupplier(b -> new FixedSizeSchema(b.numPartitions, b.numClusterings, b.partitionSize))
                                                      .checkRows(true)
                                                      .build())
         {
-            helper.readEntireTableWithAsyncPaging(1, 11000000, AsyncPagingOptions.PageUnit.BYTES); // should fit all rows
-            helper.readEntireTableWithAsyncPaging(1, 11000, AsyncPagingOptions.PageUnit.BYTES); // should fit 10 rows
-            helper.readEntireTableWithAsyncPaging(1, 110000, AsyncPagingOptions.PageUnit.BYTES); // should fit 100 rows
-            helper.readEntireTableWithAsyncPaging(1, 1100, AsyncPagingOptions.PageUnit.BYTES); // should fit 1 row
-            helper.readEntireTableWithAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.BYTES); // should fit less than 1 row
+            helper.testAsyncPaging(1, 11000000, AsyncPagingOptions.PageUnit.BYTES); // should fit all rows
+            helper.testAsyncPaging(1, 11000, AsyncPagingOptions.PageUnit.BYTES); // should fit 10 rows
+            helper.testAsyncPaging(1, 110000, AsyncPagingOptions.PageUnit.BYTES); // should fit 100 rows
+            helper.testAsyncPaging(1, 1100, AsyncPagingOptions.PageUnit.BYTES); // should fit 1 row
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.BYTES); // should fit less than 1 row
 
-            helper.readEntireTableWithAsyncPaging(1, 2000, AsyncPagingOptions.PageUnit.ROWS);
-            helper.readEntireTableWithAsyncPaging(1, 1000, AsyncPagingOptions.PageUnit.ROWS);
-            helper.readEntireTableWithAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
-            helper.readEntireTableWithAsyncPaging(1, 33, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 2000, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 1000, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 33, AsyncPagingOptions.PageUnit.ROWS);
         }
     }
 
@@ -89,18 +100,210 @@ public class AsyncPagingTest extends CQLTester
     {
         try(TestHelper helper = new TestBuilder(this).numPartitions(10)
                                                      .numClusterings(100)
-                                                     .partitionSize(1024)
+                                                     .partitionSize(10000)
+                                                     .schemaSupplier(b -> new FixedSizeSchema(b.numPartitions, b.numClusterings, b.partitionSize))
                                                      .checkRows(true)
                                                      .build())
         {
-            helper.readEntireTableWithAsyncPaging(1, 11000000, AsyncPagingOptions.PageUnit.BYTES); // should fit all rows
-            helper.readEntireTableWithAsyncPaging(1, 1100, AsyncPagingOptions.PageUnit.BYTES); // should fit 30 row
-            helper.readEntireTableWithAsyncPaging(1, 10, AsyncPagingOptions.PageUnit.BYTES); // should fit less than 1 row
+            helper.testAsyncPaging(1, 110000000, AsyncPagingOptions.PageUnit.BYTES); // should fit all rows
+            helper.testAsyncPaging(1, 11000, AsyncPagingOptions.PageUnit.BYTES); // should fit 30 row
+            helper.testAsyncPaging(1, 10, AsyncPagingOptions.PageUnit.BYTES); // should fit less than 1 row
 
-            helper.readEntireTableWithAsyncPaging(1, 10000, AsyncPagingOptions.PageUnit.ROWS);
-            helper.readEntireTableWithAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
-            helper.readEntireTableWithAsyncPaging(1, 10, AsyncPagingOptions.PageUnit.ROWS);
-            helper.readEntireTableWithAsyncPaging(1, 1, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 10000, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 10, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 1, AsyncPagingOptions.PageUnit.ROWS);
+        }
+    }
+
+    @Test
+    public void testMultipleClusteringRowsWithCompression() throws Throwable
+    {
+        try(TestHelper helper = new TestBuilder(this).numPartitions(10)
+                                                     .numClusterings(100)
+                                                     .partitionSize(10000)
+                                                     .schemaSupplier(b -> new FixedSizeSchema(b.numPartitions, b.numClusterings, b.partitionSize, true))
+                                                     .checkRows(true)
+                                                     .build())
+        {
+            helper.testAsyncPaging(1, 110000000, AsyncPagingOptions.PageUnit.BYTES); // should fit all rows
+            helper.testAsyncPaging(1, 11000, AsyncPagingOptions.PageUnit.BYTES); // should fit 30 row
+            helper.testAsyncPaging(1, 10, AsyncPagingOptions.PageUnit.BYTES); // should fit less than 1 row
+
+            helper.testAsyncPaging(1, 10000, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 10, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 1, AsyncPagingOptions.PageUnit.ROWS);
+        }
+    }
+
+    @Test
+    public void testMultipleClusteringRowsWithVariableSize() throws Throwable
+    {
+        try(TestHelper helper = new TestBuilder(this).numPartitions(10)
+                                                     .numClusterings(100)
+                                                     .partitionSize(10000)
+                                                     .schemaSupplier(b -> new VariableSizeSchema(b.numPartitions, b.numClusterings, b.partitionSize))
+                                                     .checkRows(true)
+                                                     .build())
+        {
+            helper.testAsyncPaging(1, 110000000, AsyncPagingOptions.PageUnit.BYTES); // should fit all rows
+            helper.testAsyncPaging(1, 11000, AsyncPagingOptions.PageUnit.BYTES); // should fit 30 row
+            helper.testAsyncPaging(1, 10, AsyncPagingOptions.PageUnit.BYTES); // should fit less than 1 row
+
+            helper.testAsyncPaging(1, 10000, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 10, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 1, AsyncPagingOptions.PageUnit.ROWS);
+        }
+    }
+
+    /**
+     * Test page sizes that are close to the maximum page size allowed.
+     */
+    @Test
+    public void testLargePages() throws Throwable
+    {
+        int old = DatabaseDescriptor.setNativeTransportMaxFrameSizeInMb(4); // the max page size is half this value
+
+        try(TestHelper helper = new TestBuilder(this).numPartitions(100)
+                                                     .numClusterings(100)
+                                                     .partitionSize(100000)
+                                                     .schemaSupplier(b -> new VariableSizeSchema(b.numPartitions, b.numClusterings, b.partitionSize))
+                                                     .checkRows(true)
+                                                     .build())
+        {
+            helper.testAsyncPaging(1, 4 * 1024 * 1024, AsyncPagingOptions.PageUnit.BYTES); // bigger than max max
+            helper.testAsyncPaging(1, 2 * 1024 * 1024, AsyncPagingOptions.PageUnit.BYTES); // max
+            helper.testAsyncPaging(1, (2 * 1024 * 1024) - 5000, AsyncPagingOptions.PageUnit.BYTES); // just smaller than max
+        }
+        finally
+        {
+            DatabaseDescriptor.setNativeTransportMaxFrameSizeInMb(old);
+        }
+    }
+
+    /**
+     * Test page sizes that are close to the maximum page size allowed, with rows that are bigger than the max page size.
+     */
+    @Test
+    public void testLargePagesEvenLargerRows() throws Throwable
+    {
+        int old = DatabaseDescriptor.setNativeTransportMaxFrameSizeInMb(3); // the max page size is half this value
+
+        try(TestHelper helper = new TestBuilder(this).numPartitions(100)
+                                                     .numClusterings(1)
+                                                     .partitionSize(2 * 1024 * 1024) //max mutation size is 2.5
+                                                     .schemaSupplier(b -> new VariableSizeSchema(b.numPartitions, b.numClusterings, b.partitionSize))
+                                                     .checkRows(true)
+                                                     .checkNumberOfRowsInPage(false) // OK to receive fewer rows in page if page size is bigger than max
+                                                     .build())
+        {
+            helper.testAsyncPaging(1, 3 * 1024 * 1024, AsyncPagingOptions.PageUnit.BYTES);
+            helper.testAsyncPaging(1, 2 * 1024 * 1024, AsyncPagingOptions.PageUnit.BYTES);
+            helper.testAsyncPaging(1, 1 * 1024 * 1024, AsyncPagingOptions.PageUnit.BYTES);
+
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 10, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 1, AsyncPagingOptions.PageUnit.ROWS);
+        }
+        finally
+        {
+            DatabaseDescriptor.setNativeTransportMaxFrameSizeInMb(old);
+        }
+    }
+
+    /**
+     * Make 10% of the rows larger than other rows.
+     */
+    @Test
+    public void testAbnormallyLargeRows() throws Throwable
+    {
+        try(TestHelper helper = new TestBuilder(this).numPartitions(10)
+                                                     .numClusterings(100)
+                                                     .partitionSize(10000)
+                                                     .schemaSupplier(b -> new AbonormallyLargeRowsSchema(b.numPartitions, b.numClusterings, b.partitionSize, 0.1))
+                                                     .checkRows(true)
+                                                     .build())
+        {
+
+            helper.testAsyncPaging(1, 10000, AsyncPagingOptions.PageUnit.BYTES);
+            helper.testAsyncPaging(1, 20000, AsyncPagingOptions.PageUnit.BYTES);
+            helper.testAsyncPaging(1, 50000, AsyncPagingOptions.PageUnit.BYTES);
+            helper.testAsyncPaging(1, 100000, AsyncPagingOptions.PageUnit.BYTES);
+
+            helper.testAsyncPaging(1, 50, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+        }
+    }
+
+    @Test
+    public void testSelectSinglePartition() throws Throwable
+    {
+        try(TestHelper helper = new TestBuilder(this).numPartitions(100)
+                                                     .numClusterings(100)
+                                                     .partitionSize(1000)
+                                                     .schemaSupplier(b -> new SelectInitialPartitionsSchema(b.numPartitions, b.numClusterings, b.partitionSize, 1))
+                                                     .checkRows(true)
+                                                     .build())
+        {
+            helper.testAsyncPaging(1, 10000, AsyncPagingOptions.PageUnit.BYTES);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+        }
+    }
+
+    @Test
+    public void testSelectOnlyFirstTenPartitions() throws Throwable
+    {
+        try(TestHelper helper = new TestBuilder(this).numPartitions(100)
+                                                     .numClusterings(100)
+                                                     .partitionSize(1000)
+                                                     .schemaSupplier(b -> new SelectInitialPartitionsSchema(b.numPartitions, b.numClusterings, b.partitionSize, 10))
+                                                     .checkRows(true)
+                                                     .build())
+        {
+            helper.testAsyncPaging(1, 10000, AsyncPagingOptions.PageUnit.BYTES);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+        }
+    }
+
+    /**
+     * Test interrupting async paging after N pages, and then resuming again.
+     */
+    @Test
+    public void testResumeWithAsyncPaging() throws Throwable
+    {
+        try(TestHelper helper = new TestBuilder(this).numPartitions(100)
+                                                     .numClusterings(100)
+                                                     .partitionSize(1000)
+                                                     .schemaSupplier(b -> new FixedSizeSchema(b.numPartitions, b.numClusterings, b.partitionSize))
+                                                     .checkRows(true)
+                                                     .build())
+        {
+            helper.testResumeWithAsyncPaging(50, AsyncPagingOptions.PageUnit.ROWS, 50);
+            helper.testResumeWithAsyncPaging(100, AsyncPagingOptions.PageUnit.ROWS, 10);
+            helper.testResumeWithAsyncPaging(1000, AsyncPagingOptions.PageUnit.ROWS, 5);
+
+            helper.testResumeWithAsyncPaging(5000, AsyncPagingOptions.PageUnit.BYTES, 15);
+        }
+    }
+
+    /**
+     * Test async paging for the first N pages and then completing with page-by-page.
+     */
+    @Test
+    public void testResumeWithLegacy() throws Throwable
+    {
+        try(TestHelper helper = new TestBuilder(this).numPartitions(100)
+                                                     .numClusterings(100)
+                                                     .partitionSize(1000)
+                                                     .schemaSupplier(b -> new FixedSizeSchema(b.numPartitions, b.numClusterings, b.partitionSize))
+                                                     .checkRows(true)
+                                                     .build())
+        {
+            helper.testResumeWithLegacy(50, 50);
+            helper.testResumeWithLegacy(100, 10);
+            helper.testResumeWithLegacy(1000, 5);
         }
     }
 
@@ -121,7 +324,7 @@ public class AsyncPagingTest extends CQLTester
                                                      .checkRows(true)
                                                      .build())
         {
-            helper.readEntireTableWithAsyncPaging(1, 102400, AsyncPagingOptions.PageUnit.BYTES); // 1KB * 100 rows
+            helper.testAsyncPaging(1, 102400, AsyncPagingOptions.PageUnit.BYTES); // 1KB * 100 rows
         }
     }
 
@@ -135,7 +338,7 @@ public class AsyncPagingTest extends CQLTester
                                                      .cancelAfter(3)
                                                      .build())
         {
-            helper.readEntireTableWithAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
         }
     }
 
@@ -149,7 +352,7 @@ public class AsyncPagingTest extends CQLTester
                                                      .cancelAfter(99)
                                                      .build())
         {
-            helper.readEntireTableWithAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
         }
     }
 
@@ -164,7 +367,7 @@ public class AsyncPagingTest extends CQLTester
                                                      .checkRows(true)
                                                      .build())
         {
-            long durationMillis = helper.readEntireTableWithAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            long durationMillis = helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
             assertTrue(String.format("Finished too quickly (%d millis) for this throttling level", durationMillis),
                        durationMillis >= 45000); // 100-10=90 pages at 2 / second -> 45 seconds at least, we exclude
                                                  // the first 10 pages because of the RateLimiter smoothing factor
@@ -181,7 +384,7 @@ public class AsyncPagingTest extends CQLTester
                                                      .maxPages(10)
                                                      .build())
         {
-            helper.readEntireTableWithAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
         }
     }
 
@@ -195,7 +398,7 @@ public class AsyncPagingTest extends CQLTester
                                                      .maxPages(1)
                                                      .build())
         {
-            helper.readEntireTableWithAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
         }
     }
 
@@ -209,9 +412,9 @@ public class AsyncPagingTest extends CQLTester
                                                      .maxRows(300)
                                                      .build())
         {
-            helper.readEntireTableWithAsyncPaging(1, 500, AsyncPagingOptions.PageUnit.ROWS);
-            helper.readEntireTableWithAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
-            helper.readEntireTableWithAsyncPaging(1, 43, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 500, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 100, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testAsyncPaging(1, 43, AsyncPagingOptions.PageUnit.ROWS);
         }
     }
 
@@ -221,18 +424,19 @@ public class AsyncPagingTest extends CQLTester
         try(TestHelper helper = new TestBuilder(this).numPartitions(1000)
                                                      .numClusterings(1)
                                                      .partitionSize(1024)
+                                                     .checkRows(true)
                                                      .build())
         {
 
             //warmup
-            helper.readEntireTablePageByPage(50, 100);
-            helper.readEntireTableWithAsyncPaging(50, 104800, AsyncPagingOptions.PageUnit.BYTES); // row size * 100 rows
+            helper.testLegacyPaging(50, 100);
+            helper.testAsyncPaging(50, 104800, AsyncPagingOptions.PageUnit.BYTES); // row size * 100 rows
 
             logger.info("Total time reading 1KB table with async paging: {} milliseconds",
-                        helper.readEntireTableWithAsyncPaging(500, 104800, AsyncPagingOptions.PageUnit.BYTES)); // row size * 100 rows
+                        helper.testAsyncPaging(500, 104800, AsyncPagingOptions.PageUnit.BYTES)); // row size * 100 rows
 
             logger.info("Total time reading 1KB table page by page: {} milliseconds",
-                        helper.readEntireTablePageByPage(500, 100));
+                        helper.testLegacyPaging(500, 100));
         }
     }
 
@@ -246,14 +450,14 @@ public class AsyncPagingTest extends CQLTester
                                                      .build())
         {
             //warmup
-            //helper.readEntireTablePageByPage(50, 100);
-            //helper.readEntireTableWithAsyncPaging(50, 102400, AsyncPagingOptions.PageUnit.BYTES); // 1KB * 100 rows
+            helper.testLegacyPaging(50, 100);
+            helper.testAsyncPaging(50, 102400, AsyncPagingOptions.PageUnit.BYTES); // 1KB * 100 rows
 
             logger.info("Total time reading 10KB table with async paging: {} milliseconds",
-                        helper.readEntireTableWithAsyncPaging(1000, 102400, AsyncPagingOptions.PageUnit.BYTES)); // 1KB * 100 rows
+                        helper.testAsyncPaging(1000, 102400, AsyncPagingOptions.PageUnit.BYTES)); // 1KB * 100 rows
 
-            //logger.info("Total time reading 10KB table page by page: {} milliseconds",
-            //            helper.readEntireTablePageByPage(500, 100));
+            logger.info("Total time reading 10KB table page by page: {} milliseconds",
+                        helper.testLegacyPaging(500, 100));
         }
     }
 
@@ -267,14 +471,14 @@ public class AsyncPagingTest extends CQLTester
                                                      .build())
         {
             //warmup
-            helper.readEntireTablePageByPage(50, 100);
-            helper.readEntireTableWithAsyncPaging(50, 102400, AsyncPagingOptions.PageUnit.BYTES);  // 1KB * 100 rows
+            helper.testLegacyPaging(50, 100);
+            helper.testAsyncPaging(50, 102400, AsyncPagingOptions.PageUnit.BYTES);  // 1KB * 100 rows
 
             logger.info("Total time reading 10KB table with async paging: {} milliseconds",
-                        helper.readEntireTableWithAsyncPaging(500, 102400, AsyncPagingOptions.PageUnit.BYTES)); // 1KB * 100 rows
+                        helper.testAsyncPaging(500, 102400, AsyncPagingOptions.PageUnit.BYTES)); // 1KB * 100 rows
 
             logger.info("Total time reading 10KB table page by page: {} milliseconds",
-                        helper.readEntireTablePageByPage(500, 100));
+                        helper.testLegacyPaging(500, 100));
         }
     }
 
@@ -287,14 +491,14 @@ public class AsyncPagingTest extends CQLTester
                                                      .build())
         {
             //warmup
-            helper.readEntireTablePageByPage(50, 5000);
-            helper.readEntireTableWithAsyncPaging(50, 5000, AsyncPagingOptions.PageUnit.ROWS);
+            helper.testLegacyPaging(50, 5000);
+            helper.testAsyncPaging(50, 5000, AsyncPagingOptions.PageUnit.ROWS);
 
             logger.info("Total time reading 100B table with async paging: {} milliseconds",
-                        helper.readEntireTableWithAsyncPaging(100, 5000, AsyncPagingOptions.PageUnit.ROWS));
+                        helper.testAsyncPaging(100, 5000, AsyncPagingOptions.PageUnit.ROWS));
 
             logger.info("Total time reading 100B table page by page: {} milliseconds",
-                        helper.readEntireTablePageByPage(100, 5000));
+                        helper.testLegacyPaging(100, 5000));
         }
     }
 
@@ -314,6 +518,234 @@ public class AsyncPagingTest extends CQLTester
         }
     }
 
+    private abstract static class TestSchema
+    {
+        final int numPartitions;
+        final int numClusterings;
+        final int partitionSize;
+
+        TestSchema(int numPartitions, int numClusterings, int partitionSize)
+        {
+            this.numPartitions = numPartitions;
+            this.numClusterings = numClusterings;
+            this.partitionSize = partitionSize;
+        }
+
+        static String generateText(int size)
+        {
+            Random rnd = new Random();
+            char[] chars = new char[size];
+
+            for (int i = 0; i < size; )
+                for (long v = rnd.nextLong(),
+                     n = Math.min(size - i, Long.SIZE / Byte.SIZE);
+                     n-- > 0; v >>= Byte.SIZE)
+                    chars[i++] = (char) (((v & 127) + 32) & 127);
+            return new String(chars, 0, size);
+        }
+
+        /** Create the rows that will populate the table */
+        abstract void createRows();
+
+        /** Return the text of the create statement. */
+        abstract String createStatement();
+
+        /** Return the text of the insert statement. */
+        abstract String insertStatement();
+
+        /** Return an array of rows that should be inserted in the table. */
+        abstract Object[][] insertRows();
+
+        /** Return the text of the select statement. */
+        abstract String selectStatement();
+
+        /** Return an array of rows that the select statement should return. */
+        abstract Object[][] selectRows();
+    }
+
+    /**
+     * A schema with one partition key, one clustering key two text values of
+     * identical size and a static column.
+     */
+    private static class FixedSizeSchema extends TestSchema
+    {
+        final Object[][] rows;
+        final boolean compression;
+
+        FixedSizeSchema(int numPartitions, int numClusterings, int partitionSize)
+        {
+            this(numPartitions, numClusterings, partitionSize, false);
+        }
+
+        FixedSizeSchema(int numPartitions, int numClusterings, int partitionSize, boolean compression)
+        {
+            super(numPartitions, numClusterings, partitionSize);
+            this.rows = new Object[numPartitions * numClusterings][];
+            this.compression = compression;
+        }
+
+        void createRows()
+        {
+            // These are CQL sizes and at the moment we duplicate partition and static values in each CQL row
+            // 12 is the size of the 3 integers (pk, ck, static val)
+            int rowSize = partitionSize / numClusterings;
+            int textSize = Math.max(1, (rowSize - 12) / 2);
+            for (int i = 0; i < numPartitions; i++)
+            {
+                for (int j = 0; j < numClusterings; j++)
+                {
+                    String text1 = generateText(textSize);
+                    String text2 = generateText(textSize);
+                    rows[i * numClusterings + j] = row(i, j, text1, text2, i);
+                }
+            }
+        }
+
+        public String createStatement()
+        {
+            String ret = "CREATE TABLE %s (k INT, c INT, val1 TEXT, val2 TEXT, s INT STATIC, PRIMARY KEY(k, c))";
+            if (!compression)
+                ret += " WITH compression = {'sstable_compression' : ''}";
+            return ret;
+        }
+
+        public String insertStatement()
+        {
+            return "INSERT INTO %s (k, c, val1, val2, s) VALUES (?, ?, ?, ?, ?)";
+        }
+
+        public Object[][] insertRows()
+        {
+            return rows;
+        }
+
+        public String selectStatement()
+        {
+            return "SELECT k, c, val1, val2, s FROM %s";
+        }
+
+        public Object[][] selectRows()
+        {
+            return rows;
+        }
+    }
+
+    /**
+     * This schema is the same as the fixed size schema except that each text value
+     * has a random size, making each row of size different size.
+     */
+    private static class VariableSizeSchema extends FixedSizeSchema
+    {
+        VariableSizeSchema(int numPartitions, int numClusterings, int partitionSize)
+        {
+            super(numPartitions, numClusterings, partitionSize);
+        }
+
+        @Override
+        void createRows()
+        {
+            int rowSize = partitionSize / numClusterings;
+            int textSize = Math.max(1, (rowSize - 12) / 2);
+            for (int i = 0; i < numPartitions; i++)
+            {
+                for (int j = 0; j < numClusterings; j++)
+                {
+                    String text1 = generateText(1 + randomGenerator.nextInt(textSize));
+                    String text2 = generateText(1 + randomGenerator.nextInt(textSize));
+                    rows[i * numClusterings + j] = row(i, j, text1, text2, i);
+                }
+            }
+        }
+    }
+
+    /**
+     * This schema is the same as the fixed size schema except that it introduces rows
+     * that are abnormally large.
+     */
+    private static class AbonormallyLargeRowsSchema extends FixedSizeSchema
+    {
+        /** The percentage of large rows */
+        private final double percentageLargeRows;
+
+        AbonormallyLargeRowsSchema(int numPartitions, int numClusterings, int partitionSize, double percentageLargeRows)
+        {
+            super(numPartitions, numClusterings, partitionSize);
+            this.percentageLargeRows = percentageLargeRows;
+        }
+
+        @Override
+        void createRows()
+        {
+            // These are CQL sizes and at the moment we duplicate partition and static values in each CQL row
+            // 12 is the size of the 3 integers (pk, ck, static val)
+            int rowSize = partitionSize / numClusterings;
+            int textSize = Math.max(1, (rowSize - 12) / 2);
+
+            int totRows = numPartitions * numClusterings;
+            int largeRows = (int)(totRows * percentageLargeRows);
+            int[] largeIndexes = randomGenerator.ints(0, totRows).distinct().limit(largeRows).toArray();
+            Arrays.sort(largeIndexes);
+            int currentRow = 0;
+            int nextLargeRow = 0;
+
+            for (int i = 0; i < numPartitions; i++)
+            {
+                for (int j = 0; j < numClusterings; j++)
+                {
+                    int size;
+                    if (nextLargeRow < largeIndexes.length && currentRow == largeIndexes[nextLargeRow])
+                    {   // make this row up to 50 times bigger (2 text values up to 25 times bigger)
+                        size = textSize * (1 + randomGenerator.nextInt(25));
+                        nextLargeRow++;
+                    }
+                    else
+                    {
+                        size = textSize;
+                    }
+                    String text1 = generateText(size);
+                    String text2 = generateText(size);
+                    rows[i * numClusterings + j] = row(i, j, text1, text2, i);
+                    currentRow++;
+                }
+            }
+        }
+    }
+
+    /**
+     * This schema is the same as the fixed size schema except that the select
+     * statement will only select the rows in the first N partitions. This
+     * schema is very important for testing because at the moment we do not
+     * optimize single partition queries or multi-partition queries with a SELECT IN,
+     * which means this is the only way we can test the legacy path with unit tests,
+     * otherwise we need to use dtests with CL > 1.
+     * See {@link SelectStatement.ExecutorBuilder#isLocalRangeQuery()}.
+     */
+    private static class SelectInitialPartitionsSchema extends FixedSizeSchema
+    {
+        private final int numSelectPartitions;
+
+        SelectInitialPartitionsSchema(int numPartitions, int numClusterings, int partitionSize, int numSelectPartitions)
+        {
+            super(numPartitions, numClusterings, partitionSize);
+            this.numSelectPartitions = numSelectPartitions;
+        }
+
+        public String selectStatement()
+        {
+            if (numSelectPartitions == 1)
+                return "SELECT k, c, val1, val2, s FROM %s WHERE k = 0";
+
+            return "SELECT k, c, val1, val2, s FROM %s WHERE k in ("
+                   + IntStream.range(0, numSelectPartitions).mapToObj(Integer::toString).collect(Collectors.joining(", "))
+                   + ')';
+        }
+
+        public Object[][] selectRows()
+        {
+            return Arrays.copyOfRange(rows, 0, numSelectPartitions * numClusterings);
+        }
+    }
+
     private static class TestBuilder
     {
         private final CQLTester tester;
@@ -323,10 +755,12 @@ public class AsyncPagingTest extends CQLTester
         private int numClientThreads;
         private int clientPauseMillis;
         private boolean checkRows;
+        private boolean checkNumberOfRowsInPage = true;
         private int maxRows;
         private int maxPages;
         private int maxPagesPerSecond;
         private int cancelAfter;
+        private Function<TestBuilder, TestSchema> schemaSupplier;
 
         TestBuilder(CQLTester tester)
         {
@@ -369,6 +803,12 @@ public class AsyncPagingTest extends CQLTester
             return this;
         }
 
+        TestBuilder checkNumberOfRowsInPage(boolean checkNumberOfRowsInPage)
+        {
+            this.checkNumberOfRowsInPage = checkNumberOfRowsInPage;
+            return this;
+        }
+
         TestBuilder maxRows(int maxRows)
         {
             this.maxRows = maxRows;
@@ -392,6 +832,21 @@ public class AsyncPagingTest extends CQLTester
             this.cancelAfter = cancelAfter;
             return this;
         }
+        TestBuilder schemaSupplier(Function<TestBuilder, TestSchema> schemaSupplier)
+        {
+            this.schemaSupplier = schemaSupplier;
+            return this;
+        }
+
+        TestSchema buildSchema()
+        {
+            if (this.schemaSupplier == null)
+                this.schemaSupplier = (b) -> new FixedSizeSchema(b.numPartitions, b.numClusterings, b.partitionSize);
+
+            TestSchema ret = schemaSupplier.apply(this);
+            ret.createRows();
+            return ret;
+        }
 
         public TestHelper build() throws Throwable
         {
@@ -404,30 +859,26 @@ public class AsyncPagingTest extends CQLTester
     private static class TestHelper implements AutoCloseable
     {
         private final CQLTester tester;
+        private final TestSchema schema;
         private final int protocolVersion;
-        private final int numPartitions;
-        private final int numClusterings;
-        private final int partitionSize;
         private final int numClientThreads;
         private final int clientPauseMillis;
         private final boolean checkRows;
+        private final boolean checkNumberOfRowsInPage;
         private final int maxRows;
         private final int maxPages;
         private final int maxPagesPerSecond;
         private final int cancelAfter;
 
-        private Object[][] rows;
-
         TestHelper(TestBuilder builder)
         {
             this.tester = builder.tester;
+            this.schema = builder.buildSchema();
             this.protocolVersion = Server.CURRENT_VERSION;
-            this.numPartitions = builder.numPartitions;
-            this.numClusterings = builder.numClusterings;
-            this.partitionSize = builder.partitionSize;
             this.numClientThreads = builder.numClientThreads;
             this.clientPauseMillis = builder.clientPauseMillis;
             this.checkRows = builder.checkRows;
+            this.checkNumberOfRowsInPage = builder.checkNumberOfRowsInPage;
             this.maxRows = builder.maxRows;
             this.maxPages = builder.maxPages;
             this.maxPagesPerSecond = builder.maxPagesPerSecond;
@@ -437,23 +888,10 @@ public class AsyncPagingTest extends CQLTester
         private void createTable() throws Throwable
         {
             CQLTester.initClientCluster(protocolVersion, new CustomNettyOptions(numClientThreads));
-            tester.createTable("CREATE TABLE %s (k int, c int, val1 TEXT, val2 TEXT, PRIMARY KEY(k, c)) WITH compression = {'sstable_compression' : ''}");
+            tester.createTable(schema.createStatement());
 
-            rows = new Object[numPartitions * numClusterings][];
-
-            int valueSize = partitionSize / numClusterings / 2;
-            String text1 = generateText(valueSize);
-            String text2 = generateText(valueSize);
-
-            for (int i = 0; i < numPartitions; i++)
-            {
-                for (int j = 0; j < numClusterings; j++)
-                {
-                    tester.execute("INSERT INTO %s (k, c, val1, val2) VALUES (?, ?, ?, ?)", i, j, text1, text2);
-                    rows[i * numClusterings + j] = row(i, j, text1, text2);
-                }
-            }
-
+            for (Object[] row : schema.insertRows())
+                tester.execute(schema.insertStatement(), row);
             logger.info("Finished writing.");
 
             tester.flush();
@@ -463,23 +901,10 @@ public class AsyncPagingTest extends CQLTester
             logger.info("Finished compacting.");
         }
 
-        private String generateText(int size)
-        {
-            Random rnd = new Random();
-            char[] chars = new char[size];
-
-            for (int i = 0; i < size; )
-                for (long v = rnd.nextLong(),
-                     n = Math.min(size - i, Long.SIZE / Byte.SIZE);
-                     n-- > 0; v >>= Byte.SIZE)
-                    chars[i++] = (char) (((v & 127) + 32) & 127);
-            return new String(chars, 0, size);
-        }
-
-        private long readEntireTablePageByPage(int numTrials, int pageSizeRows) throws Throwable
+        private long testLegacyPaging(int numTrials, int pageSizeRows) throws Throwable
         {
             Session session = tester.sessionNet(protocolVersion);
-            PreparedStatement prepared = session.prepare(tester.formatQuery("SELECT k, c, val1, val2 FROM %s"));
+            PreparedStatement prepared = session.prepare(tester.formatQuery(schema.selectStatement()));
             BoundStatement statement = prepared.bind();
             statement.setFetchSize(pageSizeRows);
 
@@ -491,13 +916,13 @@ public class AsyncPagingTest extends CQLTester
                 while (resultFuture != null)
                 {
                     final ResultSet resultSet = resultFuture.get();
+                    checker.checkPage(resultSet); // must check before fetching or we may receive too many rows in current page
                     if (!resultSet.isFullyFetched()) // the best we can do here is start fetching before processing
                         resultFuture = resultSet.fetchMoreResults(); // this batch of results
                     else
                         resultFuture = null;
 
                     maybePauseClient();
-                    checker.checkPage(resultSet);
                 }
 
                 checker.checkAll();
@@ -507,11 +932,11 @@ public class AsyncPagingTest extends CQLTester
 
         }
 
-        private long readEntireTableWithAsyncPaging(int numTrials, int pageSize, AsyncPagingOptions.PageUnit pageUnit) throws Throwable
+        private long testAsyncPaging(int numTrials, int pageSize, AsyncPagingOptions.PageUnit pageUnit) throws Throwable
         {
             long start = System.nanoTime();
 
-            String query = "SELECT k, c, val1, val2 FROM %s";
+            String query = schema.selectStatement();
             if (maxRows > 0)
                 query += String.format(" LIMIT %d", maxRows);
 
@@ -542,6 +967,112 @@ public class AsyncPagingTest extends CQLTester
             return (System.nanoTime() - start) / (1000000 * numTrials);
         }
 
+        /**
+         * Read the entire table starting with async paging, interrupting and resuming again.
+         *
+         * @param pageSize - the page size in the page unit specified
+         * @param pageUnit  - the page unit, bytes or rows
+         * @param interruptAfter - the number of pages after which we interrupt paging
+         * @return the time it took in milliseconds
+         */
+        private long testResumeWithAsyncPaging(int pageSize, AsyncPagingOptions.PageUnit pageUnit, int interruptAfter) throws Throwable
+        {
+            long start = System.nanoTime();
+
+            String query = schema.selectStatement();
+            if (maxRows > 0)
+                query += String.format(" LIMIT %d", maxRows);
+
+            Session session = tester.sessionNet(protocolVersion);
+            Statement statement = new SimpleStatement(tester.formatQuery(query));
+            statement.setFetchSize(pageSize);
+
+            final CheckResultSet checker = new CheckResultSet(pageSize, pageUnit);
+            ResultSet resultSet = null;
+
+            try (ResultSetIterator it = session.executeAsync(statement, AsyncPagingOptions.create(pageSize, pageUnit, maxPages, maxPagesPerSecond)))
+            {
+                int num = 0;
+                while (it.hasNext() && num < interruptAfter)
+                {
+                    resultSet = it.next();
+                    checker.checkPage(resultSet);
+                    num++;
+                }
+            }
+
+            if (resultSet != null && !resultSet.isFullyFetched())
+            {
+                try (ResultSetIterator it = resultSet.fetchRemainingResults())
+                {
+                    while (it.hasNext())
+                    {
+                        resultSet = it.next();
+                        checker.checkPage(resultSet);
+                    }
+                }
+            }
+
+            checker.checkAll();
+
+            return (System.nanoTime() - start) / 1000000;
+        }
+
+        /**
+         * Read the entire table starting with async paging and switching to legacy paging after interruptAfter.
+         *
+         * @param pageSize - the page size in rows
+         * @param interruptAfter - the number of pages after which we interrupt async paging
+         * @return the time it took in milliseconds
+         */
+        private long testResumeWithLegacy(int pageSize, int interruptAfter) throws Throwable
+        {
+            long start = System.nanoTime();
+
+            String query = schema.selectStatement();
+            if (maxRows > 0)
+                query += String.format(" LIMIT %d", maxRows);
+
+
+            Session session = tester.sessionNet(protocolVersion);
+            Statement statement = new SimpleStatement(tester.formatQuery(query));
+            statement.setFetchSize(pageSize);
+
+            AsyncPagingOptions.PageUnit pageUnit = AsyncPagingOptions.PageUnit.ROWS;
+            final CheckResultSet checker = new CheckResultSet(pageSize, pageUnit);
+            ResultSet resultSet = null;
+
+            try (ResultSetIterator it = session.executeAsync(statement, AsyncPagingOptions.create(pageSize, pageUnit, maxPages, maxPagesPerSecond)))
+            {
+                int num = 0;
+                while (it.hasNext() && num < interruptAfter)
+                {
+                    resultSet = it.next();
+                    checker.checkPage(resultSet);
+                    num++;
+                }
+            }
+
+            if (resultSet != null && !resultSet.isFullyFetched())
+            {
+                ListenableFuture<ResultSet> resultFuture = resultSet.fetchMoreResults();
+                while (resultFuture != null)
+                {
+                    resultSet = resultFuture.get();
+                    if (!resultSet.isFullyFetched()) // the best we can do here is start fetching before processing
+                        resultFuture = resultSet.fetchMoreResults(); // this batch of results
+                    else
+                        resultFuture = null;
+
+                    checker.checkPage(resultSet);
+                }
+            }
+
+            checker.checkAll();
+
+            return (System.nanoTime() - start) / 1000000;
+        }
+
         private void maybePauseClient() throws Throwable
         {
             if (clientPauseMillis > 0)
@@ -553,6 +1084,7 @@ public class AsyncPagingTest extends CQLTester
         {
             private final int pageSize;
             private final AsyncPagingOptions.PageUnit pageUnit;
+            private final Object[][] rows;
             private final List<Object[]> rowsReceived;
             private int numRowsReceived ;
             private int numPagesReceived;
@@ -562,6 +1094,7 @@ public class AsyncPagingTest extends CQLTester
             {
                 this.pageSize = pageSize;
                 this.pageUnit = pageUnit;
+                this.rows = schema.selectRows();
                 this.rowsReceived = new ArrayList<>(rows.length);
             }
 
@@ -588,9 +1121,9 @@ public class AsyncPagingTest extends CQLTester
             private synchronized void checkPage(ResultSet resultSet)
             {
                 int numRows = resultSet.getAvailableWithoutFetching();
-                logger.debug("Received {} rows", numRows);
+                logger.trace("Received {} rows", numRows);
 
-                if (pageUnit == AsyncPagingOptions.PageUnit.ROWS && numRows > 0)
+                if (checkNumberOfRowsInPage && pageUnit == AsyncPagingOptions.PageUnit.ROWS && numRows > 0)
                 {
                     int totRows = maxRows > 0 ? maxRows : rows.length;
                     assertEquals(String.format("PS %d, tot %d, received %d", pageSize, totRows, numPagesReceived),
@@ -651,13 +1184,14 @@ public class AsyncPagingTest extends CQLTester
                 //check every single row matches if so requested, requires sorting rows
                 if (checkRows)
                 {
-                    assertEquals(rowsReceived.size(), rows.length);
+                    assertEquals("Received different number of rows", rowsReceived.size(), rows.length);
                     Collections.sort(rowsReceived, RowComparator);
                     for (int i = 0; i < rows.length; i++)
                     {
                         assertEquals(rows[i].length, rowsReceived.get(i).length);
                         for (int j = 0; j < rows[i].length; j++)
-                            assertEquals(rows[i][j], rowsReceived.get(i)[j]);
+                            assertEquals(String.format("Row %d column %d were different", i, j),
+                                         rows[i][j], rowsReceived.get(i)[j]);
                     }
                 }
             }

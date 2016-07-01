@@ -393,7 +393,13 @@ public abstract class Selection
                  : c.value();
         }
 
-        public void newRow() throws InvalidRequestException
+        public void rowStart() throws InvalidRequestException
+        {
+            assert current == null;
+            current = new ArrayList<>(selection.columns.size());
+        }
+
+        public void rowEnd() throws InvalidRequestException
         {
             if (current != null)
             {
@@ -402,12 +408,11 @@ public abstract class Selection
                 {
                     boolean res = onRowCompleted(getOutputRow());
                     selectors.reset();
-                    current = null;
                     if (!res)
                         complete();
                 }
+               current = null;
             }
-            current = new ArrayList<>(selection.columns.size());
         }
 
         public void complete() throws InvalidRequestException

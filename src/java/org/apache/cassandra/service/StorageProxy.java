@@ -1815,7 +1815,7 @@ public class StorageProxy implements StorageProxyMBean
         {
             try
             {
-                command.setMonitoringTime(new ConstructionTime(constructionTime), timeout);
+                command.startMonitoring(new ConstructionTime(constructionTime), timeout);
 
                 ReadResponse response;
                 try (ReadExecutionController executionController = command.executionController();

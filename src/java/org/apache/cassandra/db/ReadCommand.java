@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,7 +29,8 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.filter.*;
-import org.apache.cassandra.db.monitoring.MonitorableImpl;
+import org.apache.cassandra.db.monitoring.ConstructionTime;
+import org.apache.cassandra.db.monitoring.Monitorable;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.StoppingTransformation;
@@ -57,7 +59,7 @@ import org.apache.cassandra.utils.Pair;
  * <p>
  * This contains all the informations needed to do a local read.
  */
-public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
+public abstract class ReadCommand implements ReadQuery
 {
     private static final int TEST_ITERATION_DELAY_MILLIS = Integer.parseInt(System.getProperty("cassandra.test.read_iteration_delay_ms", "0"));
     protected static final Logger logger = LoggerFactory.getLogger(ReadCommand.class);
@@ -123,6 +125,8 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
     private int digestVersion;
     private final boolean isForThrift;
 
+    protected Optional<Monitorable> optionalMonitor;
+
     protected static abstract class SelectionDeserializer
     {
         public abstract ReadCommand deserialize(DataInputPlus in, int version, boolean isDigest, int digestVersion, boolean isForThrift, CFMetaData metadata, int nowInSec, ColumnFilter columnFilter, RowFilter rowFilter, DataLimits limits, Optional<IndexMetadata> index) throws IOException;
@@ -160,6 +164,7 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
         this.columnFilter = columnFilter;
         this.rowFilter = rowFilter;
         this.limits = limits;
+        this.optionalMonitor = Optional.empty();
     }
 
     protected abstract void serializeSelection(DataOutputPlus out, int version) throws IOException;
@@ -329,6 +334,11 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
             return IndexMetadata.serializer.serializedSize(index.get(), version);
         else
             return 0;
+    }
+
+    public Index getIndex()
+    {
+        return getIndex(Keyspace.openAndGetStore(metadata));
     }
 
     public Index getIndex(ColumnFamilyStore cfs)
@@ -539,11 +549,15 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
 
         private boolean maybeAbort()
         {
+            if (!optionalMonitor.isPresent())
+                return false;
+
             if (TEST_ITERATION_DELAY_MILLIS > 0)
                 maybeDelayForTesting();
 
-            if (isAborted())
+            if (optionalMonitor.get().isAborted())
             {
+                logger.info("Stopping {}.{} with monitorable {}", metadata.ksName, metadata.cfName, optionalMonitor);
                 stop();
                 return true;
             }
@@ -617,10 +631,23 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
         return sb.toString();
     }
 
-    // Monitorable interface
-    public String name()
+    public void startMonitoring(ConstructionTime constructionTime, long timeout)
     {
-        return toCQLString();
+       optionalMonitor = Optional.of(Monitorable.start(toCQLString(), constructionTime, timeout));
+    }
+
+    public boolean complete()
+    {
+        if (!optionalMonitor.isPresent())
+            return true;
+
+        return optionalMonitor.get().complete();
+    }
+
+    @VisibleForTesting
+    void abort()
+    {
+        optionalMonitor.ifPresent(Monitorable::abort);
     }
 
     private static class Serializer implements IVersionedSerializer<ReadCommand>

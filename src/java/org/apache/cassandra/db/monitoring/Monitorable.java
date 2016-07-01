@@ -21,6 +21,7 @@ package org.apache.cassandra.db.monitoring;
 public interface Monitorable
 {
     String name();
+
     ConstructionTime constructionTime();
     long timeout();
 
@@ -30,4 +31,9 @@ public interface Monitorable
 
     boolean abort();
     boolean complete();
+
+    public static Monitorable start(String name, ConstructionTime constructionTime, long timeout)
+    {
+        return new MonitorableImpl(name, constructionTime, timeout);
+    }
 }

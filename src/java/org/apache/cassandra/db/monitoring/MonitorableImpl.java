@@ -18,26 +18,24 @@
 
 package org.apache.cassandra.db.monitoring;
 
-public abstract class MonitorableImpl implements Monitorable
+class MonitorableImpl implements Monitorable
 {
+    private final String name;
+    private final ConstructionTime constructionTime;
+    private final long timeout;
     private MonitoringState state;
-    private ConstructionTime constructionTime;
-    private long timeout;
 
-    protected MonitorableImpl()
+    MonitorableImpl(String name, ConstructionTime constructionTime, long timeout)
     {
+        this.name = name;
+        this.constructionTime = constructionTime;
+        this.timeout = timeout;
         this.state = MonitoringState.IN_PROGRESS;
     }
 
-    /**
-     * This setter is ugly but the construction chain to ReadCommand
-     * is too complex, it would require passing new parameters to all serializers
-     * or specializing the serializers to accept these message properties.
-     */
-    public void setMonitoringTime(ConstructionTime constructionTime, long timeout)
+    public String name()
     {
-        this.constructionTime = constructionTime;
-        this.timeout = timeout;
+        return name;
     }
 
     public ConstructionTime constructionTime()

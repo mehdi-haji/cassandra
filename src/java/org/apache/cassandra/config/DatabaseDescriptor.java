@@ -1612,6 +1612,14 @@ public class DatabaseDescriptor
         return conf.native_transport_max_frame_size_in_mb * 1024 * 1024;
     }
 
+    @VisibleForTesting
+    public static int setNativeTransportMaxFrameSizeInMb(int size)
+    {
+        int ret = conf.native_transport_max_frame_size_in_mb;
+        conf.native_transport_max_frame_size_in_mb = size;
+        return ret;
+    }
+
     public static Long getNativeTransportMaxConcurrentConnections()
     {
         return conf.native_transport_max_concurrent_connections;

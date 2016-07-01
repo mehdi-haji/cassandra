@@ -257,13 +257,6 @@ public abstract class Message
         {
             return warnings;
         }
-
-        public void prepareForSending(int streamId, Connection connection)
-        {
-            setStreamId(streamId);
-            setWarnings(ClientWarn.instance.getWarnings());
-            attach(connection);
-        }
     }
 
     @ChannelHandler.Sharable
@@ -328,25 +321,20 @@ public abstract class Message
             // The only case the connection can be null is when we send the initial STARTUP message (client side thus)
             int version = connection == null ? Server.CURRENT_VERSION : connection.getVersion();
             Codec<Message> codec = (Codec<Message>)message.type.codec;
+            Frame frame = null;
+            int messageSize = codec.encodedSize(message, version);
+
             try
             {
-                int messageSize = codec.encodedSize(message, version);
-                Frame frame = makeFrame(message, messageSize, version);
-
-                try
-                {
-                    codec.encode(message, frame.body, version);
-                }
-                catch (Throwable e)
-                {
-                    frame.body.release();
-                    throw e;
-                }
-
+                frame = makeFrame(message, messageSize, version);
+                codec.encode(message, frame.body, version);
                 results.add(frame);
             }
             catch (Throwable e)
             {
+                if (frame != null)
+                    frame.body.release();
+
                 throw ErrorMessage.wrap(e, message.getStreamId());
             }
         }
@@ -354,60 +342,70 @@ public abstract class Message
         public static Frame makeFrame(Message message, int messageSize, int version)
         {
             EnumSet<Frame.Header.Flag> flags = EnumSet.noneOf(Frame.Header.Flag.class);
-            ByteBuf body;
-            if (message instanceof Response)
+            ByteBuf body = null;
+            try
             {
-                UUID tracingId = ((Response)message).getTracingId();
-                Map<String, ByteBuffer> customPayload = message.getCustomPayload();
-                if (tracingId != null)
-                    messageSize += CBUtil.sizeOfUUID(tracingId);
-                List<String> warnings = ((Response)message).getWarnings();
-                if (warnings != null)
+                if (message instanceof Response)
                 {
-                    if (version < Server.VERSION_4)
-                        throw new ProtocolException("Must not send frame with WARNING flag for native protocol version < 4");
-                    messageSize += CBUtil.sizeOfStringList(warnings);
+                    UUID tracingId = ((Response) message).getTracingId();
+                    Map<String, ByteBuffer> customPayload = message.getCustomPayload();
+                    if (tracingId != null)
+                        messageSize += CBUtil.sizeOfUUID(tracingId);
+                    List<String> warnings = ((Response) message).getWarnings();
+                    if (warnings != null)
+                    {
+                        if (version < Server.VERSION_4)
+                            throw new ProtocolException("Must not send frame with WARNING flag for native protocol version < 4");
+                        messageSize += CBUtil.sizeOfStringList(warnings);
+                    }
+                    if (customPayload != null)
+                    {
+                        if (version < Server.VERSION_4)
+                            throw new ProtocolException("Must not send frame with CUSTOM_PAYLOAD flag for native protocol version < 4");
+                        messageSize += CBUtil.sizeOfBytesMap(customPayload);
+                    }
+                    body = CBUtil.allocator.buffer(messageSize);
+                    if (tracingId != null)
+                    {
+                        CBUtil.writeUUID(tracingId, body);
+                        flags.add(Frame.Header.Flag.TRACING);
+                    }
+                    if (warnings != null)
+                    {
+                        CBUtil.writeStringList(warnings, body);
+                        flags.add(Frame.Header.Flag.WARNING);
+                    }
+                    if (customPayload != null)
+                    {
+                        CBUtil.writeBytesMap(customPayload, body);
+                        flags.add(Frame.Header.Flag.CUSTOM_PAYLOAD);
+                    }
                 }
-                if (customPayload != null)
+                else
                 {
-                    if (version < Server.VERSION_4)
-                        throw new ProtocolException("Must not send frame with CUSTOM_PAYLOAD flag for native protocol version < 4");
-                    messageSize += CBUtil.sizeOfBytesMap(customPayload);
+                    assert message instanceof Request;
+                    if (((Request) message).isTracingRequested())
+                        flags.add(Frame.Header.Flag.TRACING);
+                    Map<String, ByteBuffer> payload = message.getCustomPayload();
+                    if (payload != null)
+                        messageSize += CBUtil.sizeOfBytesMap(payload);
+                    body = CBUtil.allocator.buffer(messageSize);
+                    if (payload != null)
+                    {
+                        CBUtil.writeBytesMap(payload, body);
+                        flags.add(Frame.Header.Flag.CUSTOM_PAYLOAD);
+                    }
                 }
-                body = CBUtil.allocator.buffer(messageSize);
-                if (tracingId != null)
-                {
-                    CBUtil.writeUUID(tracingId, body);
-                    flags.add(Frame.Header.Flag.TRACING);
-                }
-                if (warnings != null)
-                {
-                    CBUtil.writeStringList(warnings, body);
-                    flags.add(Frame.Header.Flag.WARNING);
-                }
-                if (customPayload != null)
-                {
-                    CBUtil.writeBytesMap(customPayload, body);
-                    flags.add(Frame.Header.Flag.CUSTOM_PAYLOAD);
-                }
-            }
-            else
-            {
-                assert message instanceof Request;
-                if (((Request)message).isTracingRequested())
-                    flags.add(Frame.Header.Flag.TRACING);
-                Map<String, ByteBuffer> payload = message.getCustomPayload();
-                if (payload != null)
-                    messageSize += CBUtil.sizeOfBytesMap(payload);
-                body = CBUtil.allocator.buffer(messageSize);
-                if (payload != null)
-                {
-                    CBUtil.writeBytesMap(payload, body);
-                    flags.add(Frame.Header.Flag.CUSTOM_PAYLOAD);
-                }
-            }
 
-            return Frame.create(message.type, message.getStreamId(), version, flags, body);
+                return Frame.create(message.type, message.getStreamId(), version, flags, body);
+            }
+            catch (Throwable t)
+            {
+                if (body != null)
+                    body.release();
+
+                throw t;
+            }
         }
     }
 
@@ -518,7 +516,9 @@ public abstract class Message
 
                 logger.trace("Received: {}, v={}", request, connection.getVersion());
                 response = request.execute(qstate);
-                response.prepareForSending(request.getStreamId(), connection);
+                response.setStreamId(request.getStreamId());
+                response.setWarnings(ClientWarn.instance.getWarnings());
+                response.attach(connection);
                 connection.applyStateTransition(request.type, response.type);
             }
             catch (Throwable t)

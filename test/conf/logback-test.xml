@@ -59,10 +59,12 @@
 
   <logger name="org.apache.hadoop" level="WARN"/>
 
-  <logger name="org.apache.cassandra.db.monitoring" level="DEBUG"/>
-
+  <logger name="org.apache.cassandra.db.monitoring" level="INFO"/>
+  <logger name="org.apache.cassandra.cql3.async.paging" level="INFO"/>
+  <logger name="org.apache.cassandra.cql3.statements" level="INFO"/>
   <logger name="org.apache.cassandra.transport" level="INFO"/>
-  <logger name="org.apache.cassandra.service.pager" level="DEBUG"/>
+  <logger name="org.apache.cassandra.service.pager" level="INFO"/>
+
   <logger name="com.datastax.driver.core" level="INFO"/>
   <logger name="io.netty" level="INFO"/>
 

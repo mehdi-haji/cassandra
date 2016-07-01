@@ -20,9 +20,12 @@ package org.apache.cassandra.db;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
+
+import org.apache.commons.lang.StringUtils;
 
 import org.apache.cassandra.cache.IRowCacheEntry;
 import org.apache.cassandra.cache.RowCacheKey;
@@ -34,6 +37,8 @@ import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.lifecycle.*;
 import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.monitoring.ConstructionTime;
+import org.apache.cassandra.db.monitoring.Monitorable;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.Transformation;
@@ -54,7 +59,6 @@ import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.btree.BTreeSet;
-
 
 /**
  * A read command that selects a (part of a) single partition.
@@ -319,7 +323,7 @@ public class SinglePartitionReadCommand extends ReadCommand
     {
         // We shouldn't have set digest yet when reaching that point
         assert !isDigestQuery();
-        return create(isForThrift(),
+        SinglePartitionReadCommand ret = create(isForThrift(),
                       metadata(),
                       nowInSec(),
                       columnFilter(),
@@ -327,6 +331,11 @@ public class SinglePartitionReadCommand extends ReadCommand
                       limits,
                       partitionKey(),
                       lastReturned == null ? clusteringIndexFilter() : clusteringIndexFilter.forPaging(metadata().comparator, lastReturned, false));
+
+        if (this.optionalMonitor.isPresent())
+            ret.optionalMonitor = Optional.of(this.optionalMonitor.get());
+
+        return ret;
     }
 
     public PartitionIterator execute(ConsistencyLevel consistency, ClientState clientState) throws RequestExecutionException
@@ -953,6 +962,7 @@ public class SinglePartitionReadCommand extends ReadCommand
         public final List<SinglePartitionReadCommand> commands;
         private final DataLimits limits;
         private final int nowInSec;
+        private Optional<Monitorable> optionalMonitor;
 
         public Group(List<SinglePartitionReadCommand> commands, DataLimits limits)
         {
@@ -960,6 +970,8 @@ public class SinglePartitionReadCommand extends ReadCommand
             this.commands = commands;
             this.limits = limits;
             this.nowInSec = commands.get(0).nowInSec();
+            this.optionalMonitor = Optional.empty();
+
             for (int i = 1; i < commands.size(); i++)
                 assert commands.get(i).nowInSec() == nowInSec;
         }
@@ -1029,6 +1041,28 @@ public class SinglePartitionReadCommand extends ReadCommand
         public String toString()
         {
             return commands.toString();
+        }
+
+        public void startMonitoring(ConstructionTime constructionTime, long timeout)
+        {
+            String name = StringUtils.join(commands.stream()
+                                                   .map(SinglePartitionReadCommand::toCQLString)
+                                                   .collect(Collectors.toList()).iterator(),
+                                           '\n');
+            optionalMonitor = Optional.of(Monitorable.start(name, constructionTime, timeout));
+        }
+
+        public boolean complete()
+        {
+            if (!optionalMonitor.isPresent())
+                return true;
+
+            return optionalMonitor.get().complete();
+        }
+
+        public boolean isForThrift()
+        {
+            return commands.isEmpty() ? false : commands.get(0).isForThrift();
         }
     }
 

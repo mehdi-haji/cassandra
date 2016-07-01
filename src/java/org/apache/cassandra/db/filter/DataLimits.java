@@ -21,6 +21,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Optional;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.partitions.*;
@@ -40,6 +43,8 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  */
 public abstract class DataLimits
 {
+    private static final Logger logger = LoggerFactory.getLogger(DataLimits.class);
+
     public static final Serializer serializer = new Serializer();
 
     public static final int NO_LIMIT = Integer.MAX_VALUE;
@@ -165,8 +170,6 @@ public abstract class DataLimits
     {
         // false means we do not propagate our stop signals onto the iterator, we only count
         private boolean enforceLimits = true;
-        private Optional<BasePartitions> currentPartitions = Optional.empty();
-        private Optional<BaseRows> currentRows = Optional.empty();
 
         public Counter onlyCount()
         {
@@ -207,11 +210,6 @@ public abstract class DataLimits
         public abstract boolean isDone();
         public abstract boolean isDoneForPartition();
 
-        /**
-         * Reset the counter variables so that we can start counting for another page.
-         */
-        public abstract void reset();
-
         @Override
         protected BaseRowIterator<?> applyToPartition(BaseRowIterator<?> partition)
         {
@@ -225,7 +223,6 @@ public abstract class DataLimits
         @Override
         protected void attachTo(BasePartitions partitions)
         {
-            currentPartitions = Optional.of(partitions);
             if (enforceLimits)
                 super.attachTo(partitions);
             if (isDone())
@@ -235,18 +232,11 @@ public abstract class DataLimits
         @Override
         protected void attachTo(BaseRows rows)
         {
-            currentRows = Optional.of(rows);
             if (enforceLimits)
                 super.attachTo(rows);
             applyToPartition(rows.partitionKey(), rows.staticRow());
             if (isDoneForPartition())
                 stopInPartition();
-        }
-
-        public boolean earlyTerminationRequested()
-        {
-            return (currentRows.isPresent() && currentRows.get().earlyTerminationRequested()) ||
-                   (currentPartitions.isPresent() && currentPartitions.get().earlyTerminationRequested());
         }
     }
 
@@ -434,13 +424,6 @@ public abstract class DataLimits
             {
                 return isDone() || rowInCurrentPartition >= perPartitionLimit;
             }
-
-            public void reset()
-            {
-                rowCounted = 0;
-                rowInCurrentPartition = 0;
-                hasLiveStaticRow = false;
-            }
         }
 
         @Override
@@ -503,21 +486,21 @@ public abstract class DataLimits
             private PagingAwareCounter(int nowInSec, boolean assumeLiveData)
             {
                 super(nowInSec, assumeLiveData);
+
+                rowInCurrentPartition = perPartitionLimit - lastReturnedKeyRemaining;
+
+                // lastReturnedKey is the last key for which we're returned rows in the first page.
+                // So, since we know we have returned rows, we know we have accounted for the static row
+                // if any already, so force hasLiveStaticRow to false so we make sure to not count it
+                // once more.
+                hasLiveStaticRow = false;
             }
 
             @Override
             public void applyToPartition(DecoratedKey partitionKey, Row staticRow)
             {
-                if (partitionKey.getKey().equals(lastReturnedKey))
-                {
-                    rowInCurrentPartition = perPartitionLimit - lastReturnedKeyRemaining;
-                    // lastReturnedKey is the last key for which we're returned rows in the first page.
-                    // So, since we know we have returned rows, we know we have accounted for the static row
-                    // if any already, so force hasLiveStaticRow to false so we make sure to not count it
-                    // once more.
-                    hasLiveStaticRow = false;
-                }
-                else
+                // skip the first partition, rely on the values set in the constructor for the first partition
+                if (!partitionKey.getKey().equals(lastReturnedKey))
                 {
                     super.applyToPartition(partitionKey, staticRow);
                 }
@@ -687,13 +670,6 @@ public abstract class DataLimits
             public boolean isDoneForPartition()
             {
                 return isDone() || cellsInCurrentPartition >= cellPerPartitionLimit;
-            }
-
-            public void reset()
-            {
-                partitionsCounted = 0;
-                cellsCounted = 0;
-                cellsInCurrentPartition = 0;
             }
         }
 

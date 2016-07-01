@@ -129,9 +129,12 @@ public class PartitionRangeReadCommand extends ReadCommand
         return new PartitionRangeReadCommand(isDigestQuery(), digestVersion(), isForThrift(), metadata(), nowInSec(), columnFilter(), rowFilter(), limits(), dataRange(), index);
     }
 
-    public PartitionRangeReadCommand withUpdatedLimit(DataLimits newLimits)
+    public PartitionRangeReadCommand withUpdatedParams(DataLimits limits, DataRange dataRange, Optional<IndexMetadata> index)
     {
-        return new PartitionRangeReadCommand(metadata(), nowInSec(), columnFilter(), rowFilter(), newLimits, dataRange(), index);
+        PartitionRangeReadCommand ret = new PartitionRangeReadCommand(metadata(), nowInSec(), columnFilter(), rowFilter(), limits, dataRange, index);
+        if (this.optionalMonitor.isPresent())
+            ret.optionalMonitor = Optional.of(this.optionalMonitor.get());
+        return ret;
     }
 
     public long getTimeout()

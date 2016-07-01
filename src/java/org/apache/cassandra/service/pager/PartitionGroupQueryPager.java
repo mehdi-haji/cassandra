@@ -57,7 +57,7 @@ public class PartitionGroupQueryPager extends AbstractQueryPager
             restoreState(lastReturnedKey, state.remaining, state.remainingInPartition);
         }
 
-        logger.info("Created PartitionGroupQueryPager with {} commands, state {}", group.commands.size(), state);
+        logger.debug("Created PartitionGroupQueryPager with {} commands, state {}", group.commands.size(), state);
     }
 
     /**
@@ -116,14 +116,14 @@ public class PartitionGroupQueryPager extends AbstractQueryPager
     /**
      * Select the commands that are applicable by comparing with the last returned key, if any. When we find
      * a command with the same key, return this command and all following commands but, if remaining in partition
-     * is zero, then skip the command with the same key since it means we had processed the entire partition
+     * is <= 0, then skip the command with the same key since it means we had processed the entire partition
      * (important when the partition has no clustering columns that we can use as bookmark).
      *
      * @return A sub-list of commands that we must query
      */
     private List<SinglePartitionReadCommand> commands()
     {
-        logger.info("Working out next command with {} and {} remaining in partition", lastReturnedKey, remainingInPartition());
+        logger.trace("Working out next command with {} and {} remaining in partition", lastReturnedKey, remainingInPartition());
 
         int i = 0;
         if (lastReturnedKey != null)
@@ -131,10 +131,10 @@ public class PartitionGroupQueryPager extends AbstractQueryPager
                 if (group.commands.get(i).partitionKey().equals(lastReturnedKey))
                     break;
 
-        if (remainingInPartition() == 0)
+        if (remainingInPartition() <= 0)
             i++; // no need to check this partition
 
-        logger.info("Command chosen is no. {}", i);
+        logger.trace("Command chosen is no. {}", i);
 
         if (i >= group.commands.size())
             return Collections.emptyList();
@@ -182,7 +182,7 @@ public class PartitionGroupQueryPager extends AbstractQueryPager
         if (row != null && row.clustering() != Clustering.STATIC_CLUSTERING)
             lastReturnedRow = PagingState.RowMark.create(group.metadata(), row, protocolVersion);
 
-        logger.info("Recording last values: {}, {}", lastReturnedKey, lastReturnedRow);
+        logger.trace("Recording last values: {}, {}", lastReturnedKey, lastReturnedRow);
     }
 
     protected boolean isPreviouslyReturnedPartition(DecoratedKey key)

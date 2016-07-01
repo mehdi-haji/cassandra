@@ -18,6 +18,8 @@
 package org.apache.cassandra.db;
 
 import org.apache.cassandra.db.filter.DataLimits;
+import org.apache.cassandra.db.monitoring.ConstructionTime;
+import org.apache.cassandra.db.monitoring.Monitorable;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.service.ClientState;
@@ -34,7 +36,9 @@ import org.apache.cassandra.utils.FBUtilities;
  */
 public interface ReadQuery
 {
-    ReadQuery EMPTY = new ReadQuery()
+    ReadQuery EMPTY = new EmptyQuery();
+
+    final static class EmptyQuery implements ReadQuery
     {
         public ReadExecutionController executionController()
         {
@@ -83,12 +87,27 @@ public interface ReadQuery
         {
             return FBUtilities.nowInSeconds();
         }
-    };
+
+        public void startMonitoring(ConstructionTime constructionTime, long timeout)
+        {
+
+        }
+
+        public boolean complete()
+        {
+            return true;
+        }
+
+        public boolean isForThrift()
+        {
+            return false;
+        }
+    }
 
     /**
      * Starts a new read operation.
      * <p>
-     * This must be called before {@link executeInternal} and passed to it to protect the read.
+     * This must be called before {@link this#executeInternal(ReadExecutionController)} and passed to it to protect the read.
      * The returned object <b>must</b> be closed on all path and it is thus strongly advised to
      * use it in a try-with-ressource construction.
      *
@@ -155,4 +174,25 @@ public interface ReadQuery
      * @return the time (in seconds) to use as "now".
      */
     public int nowInSec();
+
+    /**
+     * Start monitoring this query.
+     *
+     * @param constructionTime - the time at which the query was created.
+     * @param timeout - the timeout after which the query should be aborted.
+     */
+
+    public void startMonitoring(ConstructionTime constructionTime, long timeout);
+
+    /**
+     * @return true if there was no monitoring, otherwise return {@link Monitorable#complete()}.
+     */
+    public boolean complete();
+
+    /**
+     * Whether this query is for thrift or not.
+     *
+     * @return whether this query is for thrift.
+     */
+    public boolean isForThrift();
 }

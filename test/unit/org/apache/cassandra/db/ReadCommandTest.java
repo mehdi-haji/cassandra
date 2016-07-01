@@ -28,6 +28,7 @@ import org.apache.cassandra.Util;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.db.monitoring.ConstructionTime;
 import org.apache.cassandra.db.partitions.FilteredPartition;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.schema.KeyspaceParams;
@@ -81,7 +82,9 @@ public class ReadCommandTest
         ReadCommand readCommand = Util.cmd(cfs).build();
         assertEquals(2, Util.getAll(readCommand).size());
 
+        readCommand.startMonitoring(new ConstructionTime(System.currentTimeMillis()), 10);
         readCommand.abort();
+
         assertEquals(0, Util.getAll(readCommand).size());
     }
 
@@ -112,7 +115,9 @@ public class ReadCommandTest
         assertEquals(1, partitions.size());
         assertEquals(2, partitions.get(0).rowCount());
 
+        readCommand.startMonitoring(new ConstructionTime(System.currentTimeMillis()), 10);
         readCommand.abort();
+
         assertEquals(0, Util.getAll(readCommand).size());
     }
 
@@ -143,7 +148,9 @@ public class ReadCommandTest
         assertEquals(1, partitions.size());
         assertEquals(2, partitions.get(0).rowCount());
 
+        readCommand.startMonitoring(new ConstructionTime(System.currentTimeMillis()), 10);
         readCommand.abort();
+
         assertEquals(0, Util.getAll(readCommand).size());
     }
 }

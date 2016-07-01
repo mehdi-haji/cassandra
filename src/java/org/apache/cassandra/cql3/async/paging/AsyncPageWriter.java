@@ -72,6 +72,10 @@ class AsyncPageWriter implements ChunkedInput<Frame>
         try
         {
             boolean ret = pages.offer(frame, timeoutMillis, TimeUnit.MILLISECONDS);
+
+//            if (pages.size() > 0)
+//                handler.resumeTransfer();
+
             if (ret)
             {
                 handler.resumeTransfer();
@@ -100,7 +104,7 @@ class AsyncPageWriter implements ChunkedInput<Frame>
     {
         if (closed.compareAndSet(false, true))
         {
-            logger.info("Closing chunked input, pending pages: {}, completed: {}, num sent: {}", pages.size(), completed, numSent.get());
+            logger.trace("Closing chunked input, pending pages: {}, completed: {}, num sent: {}", pages.size(), completed, numSent.get());
             pages.clear();
         }
     }

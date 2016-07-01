@@ -29,6 +29,7 @@ import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
@@ -41,14 +42,18 @@ import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.db.monitoring.ApproximateTime;
+import org.apache.cassandra.db.monitoring.ConstructionTime;
 import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.view.View;
 import org.apache.cassandra.dht.AbstractBounds;
+import org.apache.cassandra.dht.LocalPartitioner;
 import org.apache.cassandra.exceptions.*;
+import org.apache.cassandra.index.Index;
 import org.apache.cassandra.index.SecondaryIndexManager;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.ClientWarn;
@@ -224,7 +229,7 @@ public class SelectStatement implements CQLStatement
         checkNotNull(cl, "Invalid empty consistency level");
         cl.validateForRead(keyspace());
 
-        if (options.getAsyncPagingOptions().asyncPagingRequested())
+        if (options.getAsyncPagingOptions().asyncPagingRequested() && state.getConnection() != null)
             return innerExecuteAsync(state, options, FBUtilities.nowInSeconds());
         else
             return innerExecute(state, options, FBUtilities.nowInSeconds(), false);
@@ -288,25 +293,31 @@ public class SelectStatement implements CQLStatement
             this.query = statement.getQuery(options, nowInSec, userLimit, userPerPartitionLimit);
         }
 
-        public Executor build(boolean forceLocal)
+        public Executor build(boolean isInternal)
         {
-            boolean isLocal = isLocalRangeQuery();
-            logger.debug("{}.{} - forceLocal: {}, isLocal: {}", statement.cfm.ksName, statement.cfm.cfName, forceLocal, isLocal);
-
-            if (forceLocal || isLocal)
-                return new LocalExecutor(this);
+            if (isInternal || isLocalRangeQuery())
+                return new LocalExecutor(this, isInternal);
 
             return new DistributedExecutor(this);
         }
 
         /**
          * Check if the query is a range query that can be executed locally,
-         * that is the key range is local and the consistency level is ONE or less.
+         * that is the key range is local and the consistency level is ONE or less,
+         * and has no index.
+         *
+         * For single partition queries, we need to worry about read repair and we currently
+         * do not handle SinglePartitionReadCommand.Group. For index range queries, we need
+         * to worry about index post processing in the coordinator. So we currently only
+         * optimize non-indexed range queries, which are the ones that are more likely to
+         * retrieve more data.
          */
         private boolean isLocalRangeQuery()
         {
-            if (query instanceof SinglePartitionReadCommand.Group)
-                return false; //not a range, we would have to check if all partitions are local
+            if (!(query instanceof PartitionRangeReadCommand))
+                return false;
+
+            PartitionRangeReadCommand cmd = (PartitionRangeReadCommand)query;
 
             Keyspace keyspace = Keyspace.open(statement.cfm.ksName);
 
@@ -317,7 +328,14 @@ public class SelectStatement implements CQLStatement
             if (bounds == null)
                 return false; // empty query
 
-            return StorageProxy.isLocalRange(keyspace, bounds);
+            Index index = cmd.getIndex();
+            if (index != null)
+                return false; // index query
+
+            // currently isLocalRangeQuery() is only called when isInternal = false but
+            // just in case we end up here for local only data let's add this safety check
+            return statement.cfm.partitioner instanceof LocalPartitioner ||
+                   StorageProxy.isLocalRange(keyspace, bounds);
         }
     }
 
@@ -409,12 +427,12 @@ public class SelectStatement implements CQLStatement
         private DistributedExecutor(ExecutorBuilder params)
         {
             super(params);
+
+            logger.trace("Created distributed executor");
         }
 
         public void retrieveAll(Selection.RowBuilder builder) throws RequestValidationException, RequestExecutionException
         {
-            logger.debug("{}.{} - distributed retrieveAll", statement.cfm.ksName, statement.cfm.cfName);
-
             try (PartitionIterator data = query.execute(options.getConsistency(), state.getClientState()))
             {
                 process(data, builder);
@@ -426,7 +444,8 @@ public class SelectStatement implements CQLStatement
         public void retrieveOnePage(PagingFactory factory) throws RequestValidationException, RequestExecutionException
         {
             QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
-            logger.debug("{}.{} - distributed retrieveOnePage {}", statement.cfm.ksName, statement.cfm.cfName, pager.getClass().getName());
+            logger.trace("{}.{} - distr retrieveOnePage {}, ps {}",
+                         statement.cfm.ksName, statement.cfm.cfName, pager.getClass().getName(), options.getPagingState());
 
             Selection.RowBuilder builder = factory.builder(pager);
             try (PartitionIterator page = pager.fetchPage(factory.pageSize(), options.getConsistency(), state.getClientState()))
@@ -440,16 +459,12 @@ public class SelectStatement implements CQLStatement
                 builder.setHasMorePages(pager.state());
 
             builder.complete();
-            if (pager.getClass().getName().endsWith("MultiPartitionPager"))
-                logger.debug("{}.{}, num rows {}, isExhausted {}", statement.cfm.ksName, statement.cfm.cfName,
-                             ((Selection.ResultSetBuilder)builder).build().size(),  pager.isExhausted());
+            logger.trace("{}.{} returning ps {}", statement.cfm.ksName, statement.cfm.cfName, pager.state());
         }
 
         public void retrieveMultiplePages(PagingFactory factory) throws RequestValidationException, RequestExecutionException
         {
             QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
-            logger.debug("{}.{} - distributed retrieveMultiplePages {}", statement.cfm.ksName, statement.cfm.cfName, pager.getClass().getName());
-
             Selection.RowBuilder builder = factory.builder(pager);
             while (!pager.isExhausted() && !builder.isCompleted())
             {
@@ -483,15 +498,21 @@ public class SelectStatement implements CQLStatement
          * to be flushed and sstables to be deleted if they've been compacted in the meantime.
          */
         private final static long MAX_ITERATION_TIME_MILLIS = 5000;
+        private final boolean isInternal;
 
-        private LocalExecutor(ExecutorBuilder params)
+        private LocalExecutor(ExecutorBuilder params, boolean isInternal)
         {
             super(params);
+            this.isInternal = isInternal;
+
+            logger.trace("Created local executor with isInternal {}", isInternal);
         }
 
         public void retrieveAll(Selection.RowBuilder builder) throws RequestValidationException, RequestExecutionException
         {
-            logger.debug("{}.{} - local retrieveAll", statement.cfm.ksName, statement.cfm.cfName);
+            maybeStartMonitoring();
+
+            logger.trace("{}.{} - local retrieveAll - isInternal {}", statement.cfm.ksName, statement.cfm.cfName, isInternal);
 
             try (ReadExecutionController executionController = query.executionController())
             {
@@ -501,13 +522,17 @@ public class SelectStatement implements CQLStatement
                 }
             }
 
+            checkMonitoringStatus();
             builder.complete();
         }
 
         public void retrieveOnePage(PagingFactory factory) throws RequestValidationException, RequestExecutionException
         {
+            maybeStartMonitoring();
+
             QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
-            logger.debug("{}.{} - local retrieveOnePage {}", statement.cfm.ksName, statement.cfm.cfName, pager.getClass().getName());
+            logger.trace("{}.{} - local retrieveOnePage {} - isInternal {}, ps {}",
+                         statement.cfm.ksName, statement.cfm.cfName, pager.getClass().getName(), isInternal, options.getPagingState());
 
             Selection.RowBuilder builder = factory.builder(pager);
             try (ReadExecutionController executionController = query.executionController();
@@ -515,6 +540,13 @@ public class SelectStatement implements CQLStatement
             {
                 process(page, builder);
             }
+            catch (Exception ex)
+            {
+                ex.printStackTrace();
+                throw ex;
+            }
+
+            checkMonitoringStatus();
 
             // Please note that the isExhausted state of the pager only gets updated when we've closed the page, so this
             // shouldn't be moved inside the 'try' above.
@@ -522,14 +554,15 @@ public class SelectStatement implements CQLStatement
                 builder.setHasMorePages(pager.state());
 
             builder.complete();
-            logger.debug("{}.{}, num rows {}, isExhausted {}", statement.cfm.ksName, statement.cfm.cfName,
+            logger.trace("{}.{}, num rows {}, isExhausted {}", statement.cfm.ksName, statement.cfm.cfName,
                          ((Selection.ResultSetBuilder)builder).build().size(),  pager.isExhausted());
         }
 
         public void retrieveMultiplePages(PagingFactory factory) throws RequestValidationException, RequestExecutionException
         {
             QueryPager pager = query.getPager(options.getPagingState(), options.getProtocolVersion());
-            logger.debug("{}.{} - local retrieveMultiplePages {}", statement.cfm.ksName, statement.cfm.cfName, pager.getClass().getName());
+            logger.trace("{}.{} - local retrieveMultiplePages {} - isInternal {}",
+                         statement.cfm.ksName, statement.cfm.cfName, pager.getClass().getName(), isInternal);
 
             Selection.RowBuilder builder = factory.builder(pager);
             while (!pager.isExhausted() && !builder.isCompleted())
@@ -547,7 +580,7 @@ public class SelectStatement implements CQLStatement
 
                         if (ApproximateTime.currentTimeMillis() - now > MAX_ITERATION_TIME_MILLIS)
                         {
-                            logger.info("Pausing long running multiple pages query to release resources");
+                            logger.trace("Pausing long running multiple pages query to release resources");
                             pager.stop(); // cannot just break or pager will think it was exhausted
                         }
                     }
@@ -559,6 +592,28 @@ public class SelectStatement implements CQLStatement
 
             if (!builder.isCompleted())
                 builder.complete();
+        }
+
+        private void maybeStartMonitoring()
+        {
+            if (isInternal)
+                return;
+
+            logger.trace("{}.{} - Starting query monitoring", statement.cfm.ksName, statement.cfm.cfName);
+            query.startMonitoring(new ConstructionTime(System.currentTimeMillis()),
+                                  DatabaseDescriptor.getTimeout(MessagingService.Verb.READ));
+        }
+
+        private void checkMonitoringStatus() throws RequestValidationException, RequestExecutionException
+        {
+            if (isInternal)
+                return;
+
+            logger.trace("{}.{} - Checking query completion", statement.cfm.ksName, statement.cfm.cfName);
+            if (!query.complete())
+            {
+                throw new ReadFailureException(options.getConsistency(), 0, 1, 1, false);
+            }
         }
     }
 
@@ -671,6 +726,7 @@ public class SelectStatement implements CQLStatement
 
         Executor executor = new ExecutorBuilder(this, options, state, nowInSec).build(false);
         StageManager.getStage(Stage.READ).execute(() -> executor.retrieveMultiplePages(AsyncPagingService.pagingFactory(this, state, options)));
+        //executor.retrieveMultiplePages(AsyncPagingService.pagingFactory(this, state, options));
         return new ResultMessage.Void();
     }
 
@@ -1025,7 +1081,7 @@ public class SelectStatement implements CQLStatement
         {
             if (!staticRow.isEmpty() && (!restrictions.hasClusteringColumnsRestriction() || cfm.isStaticCompactTable()))
             {
-                result.newRow();
+                result.rowStart();
                 for (ColumnDefinition def : selection.getColumns())
                 {
                     switch (def.kind)
@@ -1040,6 +1096,7 @@ public class SelectStatement implements CQLStatement
                             result.add(null);
                     }
                 }
+                result.rowEnd();
             }
             return;
         }
@@ -1047,7 +1104,7 @@ public class SelectStatement implements CQLStatement
         while (partition.hasNext())
         {
             Row row = partition.next();
-            result.newRow();
+            result.rowStart();
             // Respect selection order
             for (ColumnDefinition def : selection.getColumns())
             {
@@ -1067,6 +1124,7 @@ public class SelectStatement implements CQLStatement
                         break;
                 }
             }
+            result.rowEnd();
         }
     }
 

@@ -57,7 +57,7 @@ public class SinglePartitionPager extends AbstractQueryPager
     public static SinglePartitionPager empty(SinglePartitionReadCommand command, PagingState state, int protocolVersion)
     {
         SinglePartitionPager ret = new SinglePartitionPager(command, state, protocolVersion);
-        ret.exhausted = true;
+        ret.remaining = 0;
         return ret;
     }
 

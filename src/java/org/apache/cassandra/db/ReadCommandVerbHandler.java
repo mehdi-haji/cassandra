@@ -41,7 +41,7 @@ public class ReadCommandVerbHandler implements IVerbHandler<ReadCommand>
         }
 
         ReadCommand command = message.payload;
-        command.setMonitoringTime(message.constructionTime, message.getTimeout());
+        command.startMonitoring(message.constructionTime, message.getTimeout());
 
         ReadResponse response;
         try (ReadExecutionController executionController = command.executionController();

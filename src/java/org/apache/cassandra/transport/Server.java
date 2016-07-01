@@ -327,13 +327,13 @@ public class Server implements CassandraDaemon.Server
             pipeline.addLast("frameDecompressor", frameDecompressor);
             pipeline.addLast("frameCompressor", frameCompressor);
 
+            pipeline.addLast("messageDecoder", messageDecoder);
+            pipeline.addLast("messageEncoder", messageEncoder);
+
             // allows writing ChunkedInput<Frame> to the Netty context, the frames produced by
             // the chunked input will be send to the client gradually, by suspending transfer if
             // the channel is not writable
             pipeline.addLast(CHUNKED_WRITER, new ChunkedWriteHandler());
-
-            pipeline.addLast("messageDecoder", messageDecoder);
-            pipeline.addLast("messageEncoder", messageEncoder);
 
             if (server.eventExecutorGroup != null)
                 pipeline.addLast(server.eventExecutorGroup, "executor", dispatcher);

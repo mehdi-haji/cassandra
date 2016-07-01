@@ -41,8 +41,8 @@ public class MonitoringTaskTest
     private static final long timeout = 100;
     private static final long MAX_SPIN_TIME_NANOS = TimeUnit.SECONDS.toNanos(5);
 
-    public static final int REPORT_INTERVAL_MS = 600000; // long enough so that it won't check unless told to do so
-    public static final int MAX_TIMEDOUT_OPERATIONS = -1; // unlimited
+    private static final int REPORT_INTERVAL_MS = 600000; // long enough so that it won't check unless told to do so
+    private static final int MAX_TIMEDOUT_OPERATIONS = -1; // unlimited
 
     @BeforeClass
     public static void setup()
@@ -52,17 +52,9 @@ public class MonitoringTaskTest
 
     private static final class TestMonitor extends MonitorableImpl
     {
-        private final String name;
-
         TestMonitor(String name, ConstructionTime constructionTime, long timeout)
         {
-            this.name = name;
-            setMonitoringTime(constructionTime, timeout);
-        }
-
-        public String name()
-        {
-            return name;
+            super(name, constructionTime, timeout);
         }
 
         @Override
@@ -228,11 +220,10 @@ public class MonitoringTaskTest
         MonitoringTask.instance = MonitoringTask.make(REPORT_INTERVAL_MS, maxTimedoutOperations);
         try
         {
-            final int threadCount = numThreads;
-            ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
-            final CountDownLatch finished = new CountDownLatch(threadCount);
+            ExecutorService executorService = Executors.newFixedThreadPool(numThreads);
+            final CountDownLatch finished = new CountDownLatch(numThreads);
 
-            for (int i = 0; i < threadCount; i++)
+            for (int i = 0; i < numThreads; i++)
             {
                 final String operationName = "Operation " + Integer.toString(i+1);
                 final int numTimes = i + 1;

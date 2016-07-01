@@ -82,7 +82,7 @@ public class PartitionRangeQueryPager extends AbstractQueryPager
     throws RequestExecutionException
     {
         DataLimits limits;
-        DataRange fullRange = ((PartitionRangeReadCommand)command).dataRange();
+        DataRange fullRange = command.dataRange();
         DataRange pageRange;
         if (lastReturnedKey == null)
         {
@@ -108,7 +108,7 @@ public class PartitionRangeQueryPager extends AbstractQueryPager
 
         Index index = command.getIndex(Keyspace.openAndGetStore(command.metadata()));
         Optional<IndexMetadata> indexMetadata = index != null ? Optional.of(index.getIndexMetadata()) : Optional.empty();
-        return new PartitionRangeReadCommand(command.metadata(), command.nowInSec(), command.columnFilter(), command.rowFilter(), limits, pageRange, indexMetadata);
+        return command.withUpdatedParams(limits, pageRange, indexMetadata);
     }
 
     protected void recordLast(DecoratedKey key, Row last)

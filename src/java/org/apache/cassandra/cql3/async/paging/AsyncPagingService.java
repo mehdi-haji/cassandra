@@ -19,6 +19,7 @@
 package org.apache.cassandra.cql3.async.paging;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -30,6 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryOptions;
@@ -47,13 +49,16 @@ import org.apache.cassandra.transport.Connection;
 import org.apache.cassandra.transport.Frame;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.messages.ResultMessage;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JVMStabilityInspector;
+import org.apache.mina.core.future.WriteFuture;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
 
 /**
- * A collection of classes that send query results to a client using sessions
- * uniquely identified by a uuid set by the client. See CASSANDRA-11521.
+ * A collection of classes that send query results to a client asynchronously, that is as soon as a page
+ * is available without the client requesting it, by using sessions
+ * uniquely identified by a uuid set by the client. See CASSANDRA-11521 for more details.
  */
 public class AsyncPagingService
 {
@@ -63,13 +68,13 @@ public class AsyncPagingService
     public static SelectStatement.Executor.PagingFactory pagingFactory(SelectStatement statement, QueryState state, QueryOptions options)
     throws RequestValidationException, RequestExecutionException
     {
-        QueryOptions.AsyncPagingOptions asyncPagingOptions = options.getAsyncPagingOptions();
-        assert asyncPagingOptions.asyncPagingRequested();
+        QueryOptions.AsyncPagingOptions pagingOptions = options.getAsyncPagingOptions();
+        assert pagingOptions.asyncPagingRequested();
 
-        checkFalse(cancellableSessions.containsKey(asyncPagingOptions.uuid),
-                   String.format("Invalid request, already executing a session with uuid %s", asyncPagingOptions.uuid));
+        checkFalse(cancellableSessions.containsKey(pagingOptions.uuid),
+                   String.format("Invalid request, already executing a session with uuid %s", pagingOptions.uuid));
 
-        logger.info("Starting async paging session with id {}", asyncPagingOptions.uuid);
+        logger.trace("Starting async paging session with id {} and paging state {}", pagingOptions.uuid, options.getPagingState());
 
         return new SelectStatement.Executor.PagingFactory()
         {
@@ -82,7 +87,7 @@ public class AsyncPagingService
                                                   new AsyncPagingImpl(state.getConnection(), options.getAsyncPagingOptions()));
 
                 // add this session to the cancellable sessions, it will be removed by PageBuilder.complete()
-                cancellableSessions.putIfAbsent(asyncPagingOptions.uuid, ret);
+                cancellableSessions.putIfAbsent(pagingOptions.uuid, ret);
                 return ret;
             }
 
@@ -91,7 +96,7 @@ public class AsyncPagingService
                 // This is only used by non-optimized queries (SelectStatement.DistributedExecutor)
                 // and doesn't necessarily correspond to the size of the pages sent to the client, which
                 // may be different
-                return asyncPagingOptions.estimatedRows(statement.selection.estimatedRowSize());
+                return pagingOptions.estimatedRows(statement.selection.estimatedRowSize());
             }
         };
     }
@@ -106,11 +111,11 @@ public class AsyncPagingService
         PageBuilder builder = cancellableSessions.get(uuid);
         if (builder == null || builder.isStopped())
         {
-            logger.info("Cannot cancel async paging session {}: not found or already stopped", uuid);
+            logger.debug("Cannot cancel async paging session {}: not found or already stopped", uuid);
             return;
         }
 
-        logger.info("Cancelling async paging session {}", uuid);
+        logger.debug("Cancelling async paging session {}", uuid);
         builder.cancel();
     }
 
@@ -190,7 +195,6 @@ public class AsyncPagingService
             {
                 ResultMessage response = makeResponse();
                 int messageSize = ResultMessage.codec.encodedSize(response, version);
-                //logger.info("Message size {} for resp with buf {}", messageSize, ((ResultMessage.EncodedRows)response).buff);
                 Frame frame = Message.ProtocolEncoder.makeFrame(response, messageSize, version);
                 ResultMessage.codec.encode(response, frame.body, version);
 
@@ -200,7 +204,8 @@ public class AsyncPagingService
 //                    ResultMessage msg = ResultMessage.codec.decode(frame.body, version);
 //                    frame.body.readerIndex(0);
 //                    assert msg instanceof ResultMessage.Rows;
-//                    assert ((ResultMessage.Rows) msg).result.size() == numRows;
+//                    ResultSet result = ((ResultMessage.Rows) msg).result;
+//                    assert result.size() == numRows;
 //                }
 //                catch (Exception ex)
 //                {
@@ -226,10 +231,11 @@ public class AsyncPagingService
 
             /** Add a row to the buffer.
              *
-             * If we've run out of space double the buffer size, up to MAX_PAGE_SIZE_BYTES. Beyond this
-             * value just add the exact row size, since we do not allow pages bigger than this.*/
+             * If we've run out of space double the buffer size, up to MAX_PAGE_SIZE_BYTES. However make
+             * sure that at a minimum we have enough space for adding the current row. */
             void addRow(List<ByteBuffer> row)
             {
+                int prevWriteIndex = buf.writerIndex();
                 boolean ret = ResultSet.codec.encodeRow(row, metadata, buf, true);
                 if (ret)
                 {
@@ -237,9 +243,11 @@ public class AsyncPagingService
                     return;
                 }
 
-                int bufferSize = buf.capacity() * 2 <= MAX_PAGE_SIZE_BYTES
-                                 ? buf.capacity() * 2
-                                 : buf.capacity() + ResultSet.codec.encodedRowSize(row, metadata);
+                buf.writerIndex(prevWriteIndex);
+                int rowSize = ResultSet.codec.encodedRowSize(row, metadata);
+                int bufferSize = Math.max(buf.readableBytes() + rowSize, Math.min(buf.capacity() * 2, maxPageSize()));
+                logger.trace("Reallocating page buffer from {}/{} to {} for row size {} - {}",
+                             buf.readableBytes(), buf.capacity(), bufferSize, rowSize, pagingOptions.uuid);
 
                 ByteBuf old = buf;
                 try
@@ -247,15 +255,12 @@ public class AsyncPagingService
                     buf = null;
                     buf = CBUtil.allocator.buffer(bufferSize);
                     buf.writeBytes(old);
-                    old.release();
                     ResultSet.codec.encodeRow(row, metadata, buf, false);
+                    numRows++;
                 }
-                catch (Throwable t)
+                finally
                 {
                     old.release();
-
-                    throw new RuntimeException(String.format("Failed to write row to page buffer for session %s",
-                                                             pagingOptions.uuid));
                 }
             }
 
@@ -288,17 +293,27 @@ public class AsyncPagingService
                 return asyncPagingParams.isPresent() && asyncPagingParams.get().last;
             }
 
+            /**
+             * Return an average row size by calculating this page average and averaging it with the existing one.
+             *
+             * @param current - the current average row size in bytes
+             * @return - the new average row size in bytes
+             */
+            int avgRowSize(int current)
+            {
+                if (buf == null || numRows == 0)
+                    return current;
+
+                int avg = buf.readableBytes() / numRows;
+                return (avg + current) / 2;
+            }
+
             @Override
             public String toString()
             {
                 return String.format("[Page seqNo: %d, rows: %d, %s, %s]", seqNo, numRows, metadata.pagingState(), metadata.asyncPagingParams());
             }
         }
-
-        /**
-         * User page sizes bigger than this value will be ignored and this value will be used instead.
-         */
-        private final static int MAX_PAGE_SIZE_BYTES = DatabaseDescriptor.getNativeTransportMaxFrameSize() / 2;
 
         /** The ResultSet metadata is needed as the header in the page */
         private final ResultSet.ResultMetadata resultMetaData;
@@ -319,7 +334,7 @@ public class AsyncPagingService
         private final QueryOptions.AsyncPagingOptions pagingOptions;
 
         /** The average row size, initially estimated by the selection and then refined each time a page is sent */
-        private final int avgRowSize;
+        private int avgRowSize;
 
         /** The current page being written to */
         private Page currentPage;
@@ -359,33 +374,40 @@ public class AsyncPagingService
             return stopped;
         }
 
-        /** Allocate a new page: get the page size specified by the user and add some save margin and make sure it is not too big
-         * by enforcing MAX_PAGE_SIZE_BYTES as an upper limit. If the current page has the same buffer size then reuse it,
-         * otherwise release it and create a new one.
+        /** Allocate the initial page with the page size specified by the user and some safe margin added to it,
+         * but making sure it is not too big by enforcing MAX_PAGE_SIZE_BYTES as an upper limit. Otherwise
+         * reuse an existing page.
          *
-         * @param seqNo - the sequence number for the page to allocate
+         * @param seqNo - the sequence number for the new page
          */
         private void allocatePage(int seqNo)
         {
-            int bufferSize = Math.min(MAX_PAGE_SIZE_BYTES, options.getAsyncPagingOptions().bufferSize(avgRowSize) + safePageMargin());
-
-            if (currentPage != null && currentPage.buf.capacity() == bufferSize)
-            { // we could reuse larger pages too but we risk that abnormally large rows cause too much memory to be retained
-                currentPage.reuse(seqNo);
+            if (currentPage == null)
+            {
+                int bufferSize = Math.min(maxPageSize(), options.getAsyncPagingOptions().bufferSize(avgRowSize) + safePageMargin());
+                logger.trace("Allocating page with buffer size {}, avg row size {} for {}", bufferSize, avgRowSize, pagingOptions.uuid);
+                currentPage = new Page(bufferSize, resultMetaData, state, options, seqNo);
             }
             else
             {
-                if (currentPage != null)
-                {
-                    currentPage.release();
-                    currentPage = null;
-                }
-                logger.debug("Allocating page with buffer size {}, avg row size {}", bufferSize, avgRowSize);
-                currentPage = new Page(bufferSize, resultMetaData, state, options, seqNo);
+                logger.trace("Reusing page with buffer size {}, avg row size {} for {}", currentPage.buf.capacity(), avgRowSize, pagingOptions.uuid);
+                currentPage.reuse(seqNo);
             }
         }
 
         /**
+         * User page sizes bigger than this value will be ignored and this value will be used instead.
+         *
+         * @return - the max page size in bytes
+         */
+        static int maxPageSize()
+        {
+            return DatabaseDescriptor.getNativeTransportMaxFrameSize() / 2;
+        }
+
+        /**
+         * Return the safe page margin.
+         *
          * @return a number that we add to the page buffer size to reduce the probability of having to reallocate
          * to fit all page rows. Also, if a page is close to MAX_PAGE_SIZE_BYTES by this margin, we force a page
          * to be sent regardless of page limits.
@@ -396,28 +418,21 @@ public class AsyncPagingService
         }
 
         /**
-         * Send the page to the callback unless it is empty and it is not the last page.
-         * It's OK to send empty pages if they are the last page, because the client needs
-         * to know it has received the last page.
+         * Send the page to the callback.
          *
-         * @return true if the page was processed by the callback, false otherwise
+         * It's OK to send empty pages if they are the last page, because the client needs
+         * to know it has received the last page. Also update the average row size.
          */
-        private boolean processPage(boolean last)
+        private void processPage(boolean last)
         {
-            if (currentPage == null)
-                return false;
+            assert !currentPage.isEmpty() || last;
 
-            if (!currentPage.isEmpty() || last)
-            {
-                pager.saveState();
-                currentPage.metadata.setHasMorePages(pager.isExhausted() ? null : pager.state());
-                currentPage.metadata.setAsyncPagingParams(new AsyncPagingParams(pagingOptions.uuid, currentPage.seqNo, last));
+            pager.saveState();
+            currentPage.metadata.setHasMorePages(pager.isExhausted() ? null : pager.state());
+            currentPage.metadata.setAsyncPagingParams(new AsyncPagingParams(pagingOptions.uuid, currentPage.seqNo, last));
+            avgRowSize = currentPage.avgRowSize(avgRowSize);
 
-                callback.onPage(currentPage);
-                return true;
-            }
-
-            return false;
+            callback.onPage(currentPage);
         }
 
         /**
@@ -430,6 +445,12 @@ public class AsyncPagingService
          */
         public boolean onRowCompleted(List<ByteBuffer> row)
         {
+            if (currentPage == null)
+            {
+                assert stopped;
+                return false;
+            }
+
             currentPage.addRow(row);
 
             if (cancelRequested)
@@ -439,18 +460,16 @@ public class AsyncPagingService
             if (mustSendPage)
             {
                 boolean isLastPage = isLastPage(currentPage.seqNo);
-                if (processPage(isLastPage))
+                processPage(isLastPage);
+                if (!isLastPage)
                 {
-                    if (!isLastPage)
-                    {
-                        allocatePage(currentPage.seqNo + 1);
-                    }
-                    else
-                    {
-                        stop();
-                        currentPage.release();
-                        currentPage = null;
-                    }
+                    allocatePage(currentPage.seqNo + 1);
+                }
+                else
+                {
+                    stop();
+                    currentPage.release();
+                    currentPage = null;
                 }
             }
 
@@ -464,14 +483,14 @@ public class AsyncPagingService
 
         private boolean pageIsCloseToMax()
         {
-            return currentPage != null && (MAX_PAGE_SIZE_BYTES - currentPage.size()) < safePageMargin();
+            return currentPage != null && (maxPageSize() - currentPage.size()) < safePageMargin();
         }
 
         private void stop()
         {
             if (!stopped)
             {
-                logger.info("Stopping {} early", pagingOptions.uuid);
+                logger.debug("Stopping {} early", pagingOptions.uuid);
                 pager.stop();
                 stopped = true;
             }
@@ -485,7 +504,7 @@ public class AsyncPagingService
 
         public boolean resultIsEmpty()
         {
-            return currentPage.isEmpty();
+            return currentPage == null || currentPage.isEmpty();
         }
 
         @Override
@@ -513,7 +532,7 @@ public class AsyncPagingService
         /** When offering a page to the client, wait for at most this time */
         private final static int SEND_TIMEOUT_MSECS = 100;
         /** Number of attempts when offering a page to the client before we give up */
-        private final static int FAILED_SEND_NUM_ATTEMPTS = 50;
+        private final static int FAILED_SEND_NUM_ATTEMPTS = 100;
 
         private final Connection connection;
         private final QueryOptions.AsyncPagingOptions options;
@@ -534,7 +553,7 @@ public class AsyncPagingService
          */
         public void onPage(PageBuilder.Page page)
         {
-            logger.debug("Processing {}", page);
+            logger.trace("Processing {}", page);
 
             int i = 0;
             boolean sent = false;
@@ -543,12 +562,15 @@ public class AsyncPagingService
                 sent = pageWriter.sendPage(frame, !page.last(), SEND_TIMEOUT_MSECS);
 
             if (!sent)
+            {
+                frame.release();
                 throw new RuntimeException(String.format("Timed-out sending page no. %d of session %s, given up",
                                                          page.seqNo,
                                                          options.uuid));
+            }
 
             if (page.seqNo == 1)
-                writePageWriter();
+                writeToChannel(pageWriter);
         }
 
         /**
@@ -556,26 +578,21 @@ public class AsyncPagingService
          * handler (already added to the channel pipe) will try to send pages to the client when it can accept
          * them, see {@link io.netty.handler.stream.ChunkedInput} and {@link io.netty.handler.stream.ChunkedWriteHandler}.
          */
-        private AsyncPageWriter writePageWriter()
+        private void writeToChannel(Object obj)
         {
             Channel channel = connection.channel();
             ChannelPromise promise = channel.newPromise();
             promise.addListener(fut -> {
-                if (fut.isSuccess())
-                {
-                    logger.info("Finished writing response for {}", options.uuid);
-                }
-                else
+                if (!fut.isSuccess())
                 {
                     Throwable t = fut.cause();
                     JVMStabilityInspector.inspectThrowable(t);
-                    logger.error("Failed writing response for {}", options.uuid, t);
+                    logger.error("Failed writing {} for {}", obj, options.uuid, t);
                 }
             });
 
-            logger.debug("Writing page writer for session {}", options.uuid);
-            channel.writeAndFlush(pageWriter, promise);
-            return pageWriter;
+            channel.writeAndFlush(obj, promise);
         }
+
     }
 }

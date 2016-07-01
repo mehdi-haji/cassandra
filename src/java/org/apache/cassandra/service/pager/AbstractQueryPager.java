@@ -20,6 +20,9 @@ package org.apache.cassandra.service.pager;
 import java.util.Optional;
 import java.util.function.Supplier;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.partitions.*;
@@ -31,6 +34,8 @@ import org.apache.cassandra.service.ClientState;
 
 abstract class AbstractQueryPager implements QueryPager
 {
+    private static final Logger logger = LoggerFactory.getLogger(AbstractQueryPager.class);
+
     protected final ReadQuery query;
     protected final DataLimits limits;
     protected final int protocolVersion;
@@ -39,15 +44,13 @@ abstract class AbstractQueryPager implements QueryPager
     // the page limits and whether we need to retrieve a single page or multiple pages
     private Optional<Pager> internalPager;
 
-    private int remaining;
+    protected int remaining;
 
     // This is the last key we've been reading from (or can still be reading within). This the key for
     // which remainingInPartition makes sense: if we're starting another key, we should reset remainingInPartition
     // (and this is done in PagerIterator). This can be null (when we start).
     private DecoratedKey lastKey;
     private int remainingInPartition;
-
-    protected boolean exhausted;
 
     protected AbstractQueryPager(ReadQuery query, int protocolVersion)
     {
@@ -90,7 +93,10 @@ abstract class AbstractQueryPager implements QueryPager
         if (isExhausted())
             return EmptyIterators.partition();
 
-        Pager pager = new Pager(limits.forPaging(toFetch), query.nowInSec());
+        DataLimits pageLimits = lastKey == null || query.isForThrift()
+                                ? limits.forPaging(toFetch)
+                                : limits.forPaging(toFetch, lastKey.getKey(), remainingInPartition);
+        Pager pager = new Pager(pageLimits, query.nowInSec());
         internalPager = Optional.of(pager);
         PartitionIterator iter = itSupplier.get();
         return Transformation.apply(pager.counter.applyTo(iter), pager);
@@ -102,13 +108,21 @@ abstract class AbstractQueryPager implements QueryPager
      */
     private class Pager extends Transformation<RowIterator>
     {
+        private final DataLimits pageLimits;
         private final DataLimits.Counter counter;
         private Row lastRow;
         private boolean isFirstPartition = true;
+        private int counted;
+        private int countedInPartition;
+        private boolean stopped;
+        private boolean exhausted;
 
         private Pager(DataLimits pageLimits, int nowInSec)
         {
             this.counter = pageLimits.newCounter(nowInSec, true);
+            this.pageLimits = pageLimits;
+            this.counted = counter.counted();
+            this.countedInPartition = counter.countedInCurrentPartition();
         }
 
         @Override
@@ -116,7 +130,10 @@ abstract class AbstractQueryPager implements QueryPager
         {
             DecoratedKey key = partition.partitionKey();
             if (lastKey == null || !lastKey.equals(key))
+            {
                 remainingInPartition = limits.perPartitionCount();
+                countedInPartition = 0;
+            }
             lastKey = key;
 
             // If this is the first partition of this page, this could be the continuation of a partition we've started
@@ -135,7 +152,6 @@ abstract class AbstractQueryPager implements QueryPager
             }
 
             return Transformation.apply(partition, this);
-            //return Transformation.apply(counter.applyTo(partition), this);
         }
 
         @Override
@@ -143,15 +159,17 @@ abstract class AbstractQueryPager implements QueryPager
         {
             saveState();
 
-            // if no early termination was requested then the iteration must have finished
-            exhausted = !counter.earlyTerminationRequested();
+            // if the counter did not reach the page limits, then the iteration must have been
+            // exhausted unless stop() was called. Note that we set a boolean here because we
+            // can only establish this after the iteration has finished
+            exhausted = (counted < pageLimits.count()) && !stopped;
         }
 
         private void saveState()
         {
             recordLast(lastKey, lastRow);
 
-            int counted = counter.counted();
+            int counted = (counter.counted() - this.counted);
             remaining -= counted;
             // If the clustering of the last row returned is a static one, it means that the partition was only
             // containing data within the static columns. If the clustering of the last row returned is empty
@@ -164,15 +182,20 @@ abstract class AbstractQueryPager implements QueryPager
             }
             else
             {
-                remainingInPartition -= counter.countedInCurrentPartition();
+                int countedInPartition = (counter.countedInCurrentPartition() - this.countedInPartition);
+                remainingInPartition -= countedInPartition;
+                if (remainingInPartition < 0)
+                    remainingInPartition = 0;
             }
 
-            counter.reset();
+            this.counted = counter.counted();
+            this.countedInPartition = counter.countedInCurrentPartition();
         }
 
         private void stop()
         {
             counter.stop();
+            stopped = true;
         }
 
         public Row applyToStatic(Row row)
@@ -204,7 +227,16 @@ abstract class AbstractQueryPager implements QueryPager
 
     public boolean isExhausted()
     {
-        return exhausted || remaining == 0 || ((this instanceof SinglePartitionPager) && remainingInPartition == 0);
+        if (!internalPager.isPresent())
+            return limitsExceeded();
+
+         Pager pager = internalPager.get();
+        return pager.exhausted || limitsExceeded();
+    }
+
+    private boolean limitsExceeded()
+    {
+        return remaining == 0 || ((this instanceof SinglePartitionPager) && remainingInPartition == 0);
     }
 
     @Override
@@ -224,7 +256,7 @@ abstract class AbstractQueryPager implements QueryPager
         return remaining;
     }
 
-    protected int remainingInPartition()
+    int remainingInPartition()
     {
         return remainingInPartition;
     }

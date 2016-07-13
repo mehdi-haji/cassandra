@@ -440,7 +440,6 @@ public class AsyncPagingTest extends CQLTester
         }
     }
 
-   // @Ignore("Long test intended to be run manually for profiling and benchmarking")
     @Test
     public void selectEntireTable10KB() throws Throwable
     {
@@ -462,23 +461,23 @@ public class AsyncPagingTest extends CQLTester
     }
 
 
-    @Ignore("Long test intended to be run manually for profiling and benchmarking")
+    @Test
     public void selectEntireTable64KB() throws Throwable
     {
-        try(TestHelper helper = new TestBuilder(this).numPartitions(1000)
-                                                     .numClusterings(1)
+        try(TestHelper helper = new TestBuilder(this).numPartitions(500)
+                                                     .numClusterings(10)
                                                      .partitionSize(64*1024)
                                                      .build())
         {
             //warmup
-            helper.testLegacyPaging(50, 100);
-            helper.testAsyncPaging(50, 102400, AsyncPagingOptions.PageUnit.BYTES);  // 1KB * 100 rows
+            helper.testLegacyPaging(10, 1000);
+            helper.testAsyncPaging(10, 1000, AsyncPagingOptions.PageUnit.ROWS);
 
-            logger.info("Total time reading 10KB table with async paging: {} milliseconds",
-                        helper.testAsyncPaging(500, 102400, AsyncPagingOptions.PageUnit.BYTES)); // 1KB * 100 rows
+            logger.info("Total time reading 65KB table with async paging: {} milliseconds",
+                        helper.testAsyncPaging(50, 1000, AsyncPagingOptions.PageUnit.ROWS));
 
-            logger.info("Total time reading 10KB table page by page: {} milliseconds",
-                        helper.testLegacyPaging(500, 100));
+            logger.info("Total time reading 65KB table page by page: {} milliseconds",
+                        helper.testLegacyPaging(50, 1000));
         }
     }
 

@@ -19,6 +19,7 @@
 package org.apache.cassandra.cql3.async.paging;
 
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -28,6 +29,7 @@ import org.apache.commons.lang.math.RandomUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.stream.ChunkedInput;
 import io.netty.handler.stream.ChunkedWriteHandler;
@@ -44,19 +46,21 @@ import org.apache.cassandra.utils.JVMStabilityInspector;
 class AsyncPageWriter implements ChunkedInput<Frame>
 {
     private static final Logger logger = LoggerFactory.getLogger(AsyncPageWriter.class);
-    private static final int MAX_CONCURRENT_NUM_PAGES = 5; // max number of pending pages before we block
+    private static final int LOW_WATERMARK_PAGES = 1;
+    private static final int HIGH_WATERMARK_PAGES = 10;
 
-    private final ArrayBlockingQueue<Frame> pages;
+    private final ConcurrentLinkedQueue<Frame> pages;
+    private final Channel channel;
     private final ChunkedWriteHandler handler;
     private final RateLimiter limiter;
     private final AtomicBoolean completed = new AtomicBoolean(false);
     private final AtomicBoolean closed = new AtomicBoolean(false);
-    private final AtomicInteger numSent = new AtomicInteger(0);
 
     AsyncPageWriter(Connection connection, int maxPagesPerSecond)
     {
-        this.pages = new ArrayBlockingQueue<>(MAX_CONCURRENT_NUM_PAGES);
-        this.handler = (ChunkedWriteHandler)connection.channel().pipeline().get(Server.CHUNKED_WRITER);
+        this.pages = new ConcurrentLinkedQueue<>();
+        this.channel = connection.channel();
+        this.handler = (ChunkedWriteHandler)channel.pipeline().get(Server.CHUNKED_WRITER);
         this.limiter = RateLimiter.create(maxPagesPerSecond > 0 ? maxPagesPerSecond : Double.MAX_VALUE);
     }
 
@@ -64,34 +68,32 @@ class AsyncPageWriter implements ChunkedInput<Frame>
      * Adds a page to the queue so that it can be sent later on when the channel is available.
      * This method will block for up to timeoutMillis if the queue if full.
      */
-    boolean sendPage(Frame frame, boolean hasMorePages, long timeoutMillis)
+    void sendPage(Frame frame, boolean hasMorePages)
     {
         if (closed.get())
             throw new RuntimeException("Chunked input was closed");
 
         try
         {
-            boolean ret = pages.offer(frame, timeoutMillis, TimeUnit.MILLISECONDS);
-
-//            if (pages.size() > 0)
-//                handler.resumeTransfer();
-
-            if (ret)
-            {
-                handler.resumeTransfer();
-                if (!hasMorePages)
-                {
-                    if (!completed.compareAndSet(false, true))
-                        assert false : "Unexpected completed status";
-                }
-            }
-            return ret;
+            pages.offer(frame);
         }
-        catch (InterruptedException e)
+        catch (Throwable t)
         {
-            JVMStabilityInspector.inspectThrowable(e);
-            logger.error("Interrupted whilst sending page", e);
-            return false;
+            frame.release();
+            throw t;
+        }
+
+        if (channel.isWritable())
+            handler.resumeTransfer();
+
+        if (!hasMorePages)
+        {
+            if (!completed.compareAndSet(false, true))
+                assert false : "Unexpected completed status";
+        }
+        else
+        {
+            limiter.acquire();
         }
     }
 
@@ -104,7 +106,7 @@ class AsyncPageWriter implements ChunkedInput<Frame>
     {
         if (closed.compareAndSet(false, true))
         {
-            logger.trace("Closing chunked input, pending pages: {}, completed: {}, num sent: {}", pages.size(), completed, numSent.get());
+            logger.trace("Closing chunked input, pending pages: {}", pages.size());
             pages.clear();
         }
     }
@@ -119,20 +121,6 @@ class AsyncPageWriter implements ChunkedInput<Frame>
      */
     public Frame readChunk(ChannelHandlerContext channelHandlerContext) throws Exception
     {
-        if (pages.peek() == null)
-            return null;
-
-        if (!limiter.tryAcquire())
-        {
-            // if we couldn't get a permit, rather than blocking a Netty thread, try again after a small random amount of time
-            channelHandlerContext.executor().schedule(handler::resumeTransfer, RandomUtils.nextInt(100), TimeUnit.MICROSECONDS);
-            return null;
-        }
-
-        Frame response = pages.poll();
-        if (response != null)
-            numSent.incrementAndGet();
-
-        return response;
+        return pages.poll();
     }
 }

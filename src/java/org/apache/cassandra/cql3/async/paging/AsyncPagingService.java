@@ -19,7 +19,6 @@
 package org.apache.cassandra.cql3.async.paging;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -31,7 +30,6 @@ import org.slf4j.LoggerFactory;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryOptions;
@@ -49,9 +47,7 @@ import org.apache.cassandra.transport.Connection;
 import org.apache.cassandra.transport.Frame;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.messages.ResultMessage;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JVMStabilityInspector;
-import org.apache.mina.core.future.WriteFuture;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
 
@@ -529,11 +525,6 @@ public class AsyncPagingService
      */
     private final static class AsyncPagingImpl implements PageBuilder.Callback
     {
-        /** When offering a page to the client, wait for at most this time */
-        private final static int SEND_TIMEOUT_MSECS = 100;
-        /** Number of attempts when offering a page to the client before we give up */
-        private final static int FAILED_SEND_NUM_ATTEMPTS = 100;
-
         private final Connection connection;
         private final QueryOptions.AsyncPagingOptions options;
         private final AsyncPageWriter pageWriter;
@@ -554,20 +545,7 @@ public class AsyncPagingService
         public void onPage(PageBuilder.Page page)
         {
             logger.trace("Processing {}", page);
-
-            int i = 0;
-            boolean sent = false;
-            Frame frame = page.makeFrame();
-            while (!sent && i++ < FAILED_SEND_NUM_ATTEMPTS)
-                sent = pageWriter.sendPage(frame, !page.last(), SEND_TIMEOUT_MSECS);
-
-            if (!sent)
-            {
-                frame.release();
-                throw new RuntimeException(String.format("Timed-out sending page no. %d of session %s, given up",
-                                                         page.seqNo,
-                                                         options.uuid));
-            }
+            pageWriter.sendPage(page.makeFrame(), !page.last());
 
             if (page.seqNo == 1)
                 writeToChannel(pageWriter);

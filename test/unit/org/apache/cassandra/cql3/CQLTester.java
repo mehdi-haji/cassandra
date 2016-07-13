@@ -62,6 +62,7 @@ import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.transport.Event;
+import org.apache.cassandra.transport.RequestThreadPoolExecutor;
 import org.apache.cassandra.transport.Server;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -347,7 +348,11 @@ public abstract class CQLTester
         StorageService.instance.initServer();
         SchemaLoader.startGossiper();
 
-        server = new Server.Builder().withHost(nativeAddr).withPort(nativePort).build();
+        server = new Server.Builder()
+                 .withHost(nativeAddr)
+                 .withPort(nativePort)
+                 .withEventExecutor(new RequestThreadPoolExecutor()).build();
+
         server.start();
 
         if (initClientClusters)

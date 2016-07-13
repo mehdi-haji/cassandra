@@ -725,8 +725,9 @@ public class SelectStatement implements CQLStatement
                    + " you must either remove the ORDER BY or the IN and sort client side, or avoid async paging for this query");
 
         Executor executor = new ExecutorBuilder(this, options, state, nowInSec).build(false);
-        StageManager.getStage(Stage.READ).execute(() -> executor.retrieveMultiplePages(AsyncPagingService.pagingFactory(this, state, options)));
-        //executor.retrieveMultiplePages(AsyncPagingService.pagingFactory(this, state, options));
+        StageManager.getStage(Stage.READ).submit(() -> executor.retrieveMultiplePages(AsyncPagingService.pagingFactory(SelectStatement.this, state, options)));
+        //executor.retrieveMultiplePages(AsyncPagingService.pagingFactory(SelectStatement.this, state, options));
+
         return new ResultMessage.Void();
     }
 

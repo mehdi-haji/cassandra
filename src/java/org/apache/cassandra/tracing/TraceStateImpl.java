@@ -20,6 +20,8 @@ package org.apache.cassandra.tracing;
 import java.net.InetAddress;
 import java.util.Collections;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
@@ -27,6 +29,7 @@ import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.exceptions.OverloadedException;
 import org.apache.cassandra.service.StorageProxy;
+import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.WrappedRunnable;
 
 /**
@@ -46,6 +49,29 @@ public class TraceStateImpl extends TraceState
         final int elapsed = elapsed();
 
         executeMutation(TraceKeyspace.makeEventMutation(sessionIdBytes, message, elapsed, threadName, ttl));
+    }
+
+    /**
+     * Post a no-op event to the TRACING stage, so that we can be sure that any previous mutations
+     * have at least been applied to one replica. This works because the tracking executor only
+     * has one thread in its pool, see {@link StageManager#tracingExecutor()}.
+     */
+    protected void waitForPendingEvents()
+    {
+        try
+        {
+            StageManager.getStage(Stage.TRACING).submit(new WrappedRunnable()
+            {
+                protected void runMayThrow()
+                {
+
+                }
+            }).get(1, TimeUnit.SECONDS);
+        }
+        catch (Throwable t)
+        {
+            JVMStabilityInspector.inspectThrowable(t);
+        }
     }
 
     static void executeMutation(final Mutation mutation)

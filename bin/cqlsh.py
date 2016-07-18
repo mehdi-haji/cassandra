@@ -1116,7 +1116,7 @@ class Shell(cmd.Cmd):
                 except EOFError:
                     self.handle_eof()
                 except CQL_ERRORS, cqlerr:
-                    self.printerr(unicode(cqlerr))
+                    self.printerr(cqlerr.message.decode(encoding='utf-8'))
                 except KeyboardInterrupt:
                     self.reset_statement()
                     print
@@ -1275,13 +1275,16 @@ class Shell(cmd.Cmd):
             try:
                 future = self.session.execute_async(statement, trace=self.tracing_enabled)
                 result = future.result()
+
+                if not future.is_schema_agreed:
+                    self.refresh_schema_metadata_best_effort()
+
                 break
             except cassandra.OperationTimedOut, err:
-                self.refresh_schema_metadata_best_effort()
-                self.printerr(unicode(err.__class__.__name__) + u": " + unicode(err))
+                self.printerr(unicode(err.__class__.__name__) + u": " + err.message.decode(encoding='utf-8'))
                 return False, None
             except CQL_ERRORS, err:
-                self.printerr(unicode(err.__class__.__name__) + u": " + unicode(err))
+                self.printerr(unicode(err.__class__.__name__) + u": " + err.message.decode(encoding='utf-8'))
                 return False, None
             except Exception, err:
                 import traceback
